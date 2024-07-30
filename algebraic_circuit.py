@@ -94,7 +94,7 @@ class EdgeLabelSystem(BaseObject):
                     return l
 
 
-    def build_solution_vector(self, sol: dict):
+    def build_solution_vector(self, sol: 'Dict[Label, FieldElement]'):
         values = [0]*len(self.labels)
         for label, value in sol.items():
             values[self[label]] = value
@@ -124,6 +124,7 @@ class Node(BaseObject):
         self.in_nodes  = []
         self.out_nodes = []
         self.out_label = None
+        self._value    = None
 
     def __reprdir__(self):
         return ['label', 'out_label']
@@ -161,6 +162,7 @@ class Node(BaseObject):
         self.validate()
         self.try_generate_label()
 
+
     def generate_constraint(self):
         self.finalize()
     
@@ -176,6 +178,14 @@ class Node(BaseObject):
                     return r.build_expression()*l.label.value
 
 
+    @property
+    def value(self):
+        if self._value is None:
+            self._value = self.execute()
+
+        return self._value
+
+
 class Source(Node):
     def validate(self):
         assert len(self.in_nodes) == 0
@@ -186,8 +196,21 @@ class Source(Node):
                 self.out_label = self.system.generate()
 
 
+    @property
+    def value(self):
+        if self.label.is_constant():
+            return self.label.value
+
+        return self._value
+
+    def set_value(self, value):
+        self._value = value
+
 
 class Sink(Node):
+    def execute(self):
+        return self.in_nodes[0].execute()
+
     def validate(self):
         assert len(self.in_nodes) == 1
         assert len(self.out_nodes) == 0
@@ -220,6 +243,11 @@ class AdditionGate(ArithmeticGate):
                 return l.build_expression() + self.system.build_expression(r.label.value)
 
 
+    def execute(self):
+        l,r = self.in_nodes
+        return l.value + r.value
+
+
 class MultiplicationGate(ArithmeticGate):
     def generate_constraint(self):
         self.finalize()
@@ -243,11 +271,28 @@ class MultiplicationGate(ArithmeticGate):
             else:
                 return l.build_expression() * r.label.value
 
+    def execute(self):
+        l,r = self.in_nodes
+        return l.value * r.value
 
 
 class AlgebraicCircuit(BaseObject):
     def __init__(self, nodes):
-        self.nodes  = nodes
+        self.nodes = nodes
+    
+
+    def execute(self):
+        results = {}
+        for n in self.nodes:
+            if type(n) is Sink:
+                n.execute()
+        
+        for n in self.nodes:
+            if n.out_label:
+                results[n.out_label] = n.value
+        
+        return results
+
 
     def build_r1cs_system(self):
         for node in self.nodes:
@@ -292,6 +337,15 @@ x3.out_label.rep = 'W3'
 m1.out_label.rep = 'W4'
 m2.out_label.rep = 'I1'
 
-# Check to see if it works
+# Check to see if example works
 S = els.build_solution_vector({els['W1']: F(2), els['W2']: F(3), els['W3']: F(4), els['W4']: F(6), els['I1']: F(11)})
+assert r1cs.is_valid_assignment(S)
+
+# Try custom trace
+x1.set_value(F(7))
+x2.set_value(F(3))
+x3.set_value(F(2))
+
+res = circuit.execute()
+S   = els.build_solution_vector(res)
 assert r1cs.is_valid_assignment(S)
