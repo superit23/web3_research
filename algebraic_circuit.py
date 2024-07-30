@@ -349,3 +349,53 @@ x3.set_value(F(2))
 res = circuit.execute()
 S   = els.build_solution_vector(res)
 assert r1cs.is_valid_assignment(S)
+
+
+class QAPSystem(BaseObject):
+    def __init__(self, T, Ax, Bx, Cx):
+        self.T  = T
+        self.Ax = Ax
+        self.Bx = Bx
+        self.Cx = Cx
+
+
+    @staticmethod
+    def from_r1cs_system(F: 'Field', r1cs: R1CSSystem):
+        # Set up some vars
+        k     = len(r1cs.constraints)
+        nm    = len(r1cs.constraints[0].ai)
+        A,B,C = [[] for _ in range(nm)], [[] for _ in range(nm)], [[] for _ in range(nm)]
+
+        Fm    = F.mul_group()
+        G     = Fm.find_gen()
+        m     = [G*j for j in range(1,k+1)]
+        x     = Symbol('x')
+        P     = F[x]
+        T     = product([(x-ml) for ml in m])
+
+        # Sort constraints into their polynomials
+        for constraint in r1cs.constraints:
+            for j, a in enumerate(constraint.ai):
+                A[j].append(a)
+
+            for j, b in enumerate(constraint.bi):
+                B[j].append(b)
+
+            for j, c in enumerate(constraint.ci):
+                C[j].append(c)
+
+
+        Ax, Bx, Cx = [[P.interpolate(list(zip(m, Xj))) for Xj in X] for X in (A, B, C)]
+        return QAPSystem(T, Ax, Bx, Cx)
+
+
+    def is_valid_assignment(self, S: list):
+        A = sum([a*v for a,v in zip(self.Ax, [1] + S)])
+        B = sum([b*v for b,v in zip(self.Bx, [1] + S)])
+        C = sum([c*v for c,v in zip(self.Cx, [1] + S)])
+
+        return (A * B - C) % self.T == P(0)
+
+
+qap = QAPSystem.from_r1cs_system(F, r1cs)
+assert qap.is_valid_assignment(S)
