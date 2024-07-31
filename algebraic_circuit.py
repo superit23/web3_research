@@ -416,10 +416,56 @@ class Reference(BaseObject):
 
 
 class Namespace(BaseObject):
-    def __init__(self, name: str):
+    def __init__(self, name: str, parent=None):
         self.name    = name
         self.objects = {}
-    
+        self.parent  = parent
+
+
+    def get_fqns(self):
+        if self.parent and self.parent.parent:
+            return f'{self.parent.parent.namespace.get_fqns()}.{self.name}'
+        else:
+            return self.name
+
+
+    def get_namespace_by_rns(self, rns: str):
+        """
+        Traverses the namespace tree by its relative name.
+        """
+        fqns = self.get_fqns()
+
+        # RNS is a FQNS and matches us
+        # fqns: 'main.mul.doit'
+        # rns:  'main.mul.doit'
+        if fqns == rns:
+            return self
+        
+        # The RNS refers to a lower FQNS
+        # fqns: 'main.mul'
+        # rns:  'main.mul.doit'
+        elif rns.startswith(fqns):
+            return self[rns.split(fqns)[1].strip('.')].namespace
+        
+
+        # The RNS refers to a lower relative namespace
+        # fqns: 'main'
+        # rns:  'mul'
+        elif rns in self.objects:
+            return self[rns].namespace
+
+        # The RNS refers to a higher namespace or different namespace on the same level
+        # fqns: 'main.mul.doit'
+        # rns:  'main.mul'
+
+        # fqns: 'main.mul.doit1'
+        # rns:  'main.mul.doit2'
+        elif self.parent:
+            return self.parent.parent.namespace.get_namespace_by_rns(rns)
+
+        raise RuntimeError("Cannot traverse further; no higher parent")
+
+
 
     def __reprdir__(self):
         return ['name']
@@ -469,10 +515,11 @@ class Namespace(BaseObject):
             self.objects[curr_part] = value
     
 
-    def copy(self, namespace):
-        new_obj = Namespace(self.name)
+    def copy(self, parent, namespace, ns_translation):
+        print(self.__class__, self, namespace)
+        new_obj = Namespace(self.name, parent)
         for k,v in self.objects.items():
-            new_obj[k] = v.copy(new_obj)
+            new_obj[k] = v.copy(parent, new_obj, ns_translation)
         
         return new_obj
 
@@ -506,12 +553,34 @@ class ASTObject(BaseObject):
 
     def clear_build(self):
         self._last_built = None
-    
 
-    def copy(self, namespace):
+
+    def copy(self, parent, namespace, ns_translation):
+        print(self.__class__, self, namespace)
         new_obj = self.__class__(name=self.name, els=self.els)
-        new_obj.in_edges  = [namespace.ref(e.name) for e in self.in_edges]
-        new_obj.out_edges = [namespace.ref(e.name) for e in self.out_edges]
+
+        # Make sure that nodes from other namespaces are correctly wired
+        in_edges = []
+        if self.name == 'x1':
+            raise RuntimeError
+        for ref in self.in_edges:
+            curr_name = ns_translation.get(ref.namespace.name, ref.namespace.name)
+            ref_ns    = namespace.get_namespace_by_rns(curr_name)
+            in_edges.append(ref_ns.ref(ref.name))
+
+        out_edges = []
+        for ref in self.out_edges:
+            curr_name = ns_translation.get(ref.namespace.name, ref.namespace.name)
+            ref_ns    = namespace.get_namespace_by_rns(curr_name)
+            out_edges.append(ref_ns.ref(ref.name))
+
+
+        new_obj.in_edges  = in_edges
+        new_obj.out_edges = out_edges
+
+        # new_obj.in_edges  = [namespace.ref(e.name) for e in self.in_edges] # TODO: THIS IS WRONG WHEN THERE'S NODES FROM OTHER NAMESPACES
+        # new_obj.out_edges = [namespace.ref(e.name) for e in self.out_edges]
+        new_obj.parent    = parent
         return new_obj
 
 
@@ -551,80 +620,6 @@ class Output(ASTObject):
             return node
 
 
-class Template(BaseObject):
-    def __init__(self, name=None, els=None):
-        self.name      = name
-        self.els       = els
-        self.namespace = Namespace(name)
-
-
-    def __getattr__(self, name):
-        try:
-            return object.__getattr__(self, name)
-        except AttributeError as e:
-            try:
-                return self.namespace[name]
-            except KeyError:
-                raise e
-
-
-    def add(self, obj):
-        obj.els    = self.els
-        obj.parent = self
-        self.namespace[obj.name] = obj
-        return obj
-
-
-    def instantiate(self, name, parent=None):
-        els       = parent.els if parent else self.els
-        component = Component(name=name, els=els)
-
-        for k,v in self.namespace.objects.items():
-            new_obj                = v.copy(component.namespace)
-            new_obj.parent         = component
-            component.namespace[k] = new_obj
-
-        if parent:
-            parent.namespace[name] = component
-        
-        return component
-
-
-class Component(BaseObject):
-    def __init__(self, name=None, els=None, namespace=None):
-        self.name      = name
-        self.els       = els
-        self.namespace = namespace or Namespace(name)
-
-
-    def __getattr__(self, name):
-        try:
-            return object.__getattr__(self, name)
-        except AttributeError as e:
-            try:
-                return self.namespace[name]
-            except KeyError:
-                raise e
-
-
-    def _flatten(self):
-        nodes = []
-        for v in self.namespace.objects.values():
-            if type(v) is Component:
-                nodes.extend(v._flatten())
-            else:
-                nodes.append(v.build())
-        return nodes
-    
-
-    def build_circuit(self):
-        return AlgebraicCircuit(self._flatten())
-    
-
-    def copy(self, namespace):
-        new_obj = self.__class__(name=self.name, els=self.els, namespace=self.namespace.copy(namespace))
-        return new_obj
-
 
 class MUL(ASTObject):
     def force_build(self):
@@ -648,6 +643,101 @@ class MUL(ASTObject):
                 node.add_out_edge(out_node)
 
         return node
+
+RESULTS = []
+class Template(BaseObject):
+    def __init__(self, name=None, els=None):
+        self.name      = name
+        self.els       = els
+        self.namespace = Namespace(name, self)
+        self.parent    = None
+
+
+    def __getattr__(self, name):
+        try:
+            return object.__getattr__(self, name)
+        except AttributeError as e:
+            try:
+                return self.namespace[name]
+            except KeyError:
+                raise e
+
+
+    def add(self, obj):
+        obj.els    = self.els
+        obj.parent = self
+        self.namespace[obj.name] = obj
+        return obj
+
+
+    def instantiate(self, name, parent=None):
+        els            = parent.els if parent else self.els
+        component      = Component(name=name, els=els)
+        ns_translation = {self.namespace.name: name}
+
+        if parent:
+            parent.namespace[name] = component
+
+        print(ns_translation, component.namespace)
+        global RESULTS
+        RESULTS.append(component)
+
+        # Do components first to prevent dependency issues
+        for k,v in self.namespace.objects.items():
+            if v.is_a(Component):
+                print(component.namespace.objects)
+                new_obj                = v.copy(component, component.namespace, ns_translation)
+                component.namespace[k] = new_obj
+
+        for k,v in self.namespace.objects.items():
+            if not v.is_a(Component):
+                new_obj                = v.copy(component, component.namespace, ns_translation)
+                component.namespace[k] = new_obj
+
+        return component
+
+
+class Component(BaseObject):
+    def __init__(self, name=None, els=None, namespace=None, parent=None):
+        self.name      = name
+        self.els       = els
+        self.namespace = namespace or Namespace(name, self)
+        self.parent    = parent
+
+
+    def __getattr__(self, name):
+        try:
+            return object.__getattr__(self, name)
+        except AttributeError as e:
+            try:
+                return self.namespace[name]
+            except KeyError:
+                raise e
+
+
+    def _flatten(self):
+        nodes = []
+        for v in self.namespace.objects.values():
+            if type(v) is Component:
+                nodes.extend(v._flatten())
+            else:
+                nodes.append(v.build())
+        return nodes
+
+
+    def build_circuit(self):
+        return AlgebraicCircuit(self._flatten())
+
+
+    def copy(self, parent, namespace, ns_translation):
+        print(self.__class__, self, namespace)
+        new_obj                  = self.__class__(name=self.name, els=self.els)
+        namespace[self.name]     = self
+        new_obj.parent           = parent
+        new_obj.namespace        = self.namespace.copy(new_obj, namespace, ns_translation)
+        new_obj.namespace.parent = new_obj
+        return new_obj
+
 
 
 els = EdgeLabelSystem()
