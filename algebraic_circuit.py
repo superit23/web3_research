@@ -118,9 +118,9 @@ class R1CSExpression(BaseObject):
 #########
 
 class Node(BaseObject):
-    def __init__(self, label: Label, system: EdgeLabelSystem):
+    def __init__(self, label: Label, els: EdgeLabelSystem):
         self.label     = label
-        self.system    = system
+        self.els       = els
         self.in_nodes  = []
         self.out_nodes = []
         self.out_label = None
@@ -128,6 +128,10 @@ class Node(BaseObject):
 
     def __reprdir__(self):
         return ['label', 'out_label']
+    
+
+    def __hash__(self):
+        return hash((self.__class__, self.label, self.out_label, self._value))
 
     def is_labeled(self):
         return self.label is not None
@@ -147,7 +151,7 @@ class Node(BaseObject):
 
             if l.out_label or r.out_label:
                 if not self.out_label:
-                    self.out_label = self.system.generate()
+                    self.out_label = self.els.generate()
 
 
     def validate(self):
@@ -170,7 +174,7 @@ class Node(BaseObject):
     def build_expression(self):
         self.finalize()
         if self.out_label:
-            return self.system.build_expression(self.out_label)
+            return self.els.build_expression(self.out_label)
         else:
             l,r = self.in_nodes
             if l.label.is_constant():
@@ -193,7 +197,7 @@ class Source(Node):
     def try_generate_label(self):
         if not self.label.is_constant():
             if not self.out_label:
-                self.out_label = self.system.generate()
+                self.out_label = self.els.generate()
 
 
     @property
@@ -225,22 +229,22 @@ class AdditionGate(ArithmeticGate):
         l,r = self.in_nodes
         return R1CSConstraint(
             (l.build_expression() + r.build_expression()).values,
-            self.system.build_expression(1).values,
+            self.els.build_expression(1).values,
             self.build_expression().values
         )
 
     def build_expression(self):
         self.finalize()
         if self.out_label:
-            return self.system.build_expression(self.out_label)
+            return self.els.build_expression(self.out_label)
         else:
             l,r = self.in_nodes
             if l.label.is_constant():
                 # If l is constant, r must not be
                 assert not r.label.is_constant()
-                return r.build_expression() + self.system.build_expression(l.label.value)
+                return r.build_expression() + self.els.build_expression(l.label.value)
             else:
-                return l.build_expression() + self.system.build_expression(r.label.value)
+                return l.build_expression() + self.els.build_expression(r.label.value)
 
 
     def execute(self):
@@ -261,7 +265,7 @@ class MultiplicationGate(ArithmeticGate):
     def build_expression(self):
         self.finalize()
         if self.out_label:
-            return self.system.build_expression(self.out_label)
+            return self.els.build_expression(self.out_label)
         else:
             l,r = self.in_nodes
             if l.label.is_constant():
@@ -270,6 +274,7 @@ class MultiplicationGate(ArithmeticGate):
                 return r.build_expression() * l.label.value
             else:
                 return l.build_expression() * r.label.value
+
 
     def execute(self):
         l,r = self.in_nodes
@@ -286,7 +291,7 @@ class AlgebraicCircuit(BaseObject):
         for n in self.nodes:
             if type(n) is Sink:
                 n.execute()
-        
+
         for n in self.nodes:
             if n.out_label:
                 results[n.out_label] = n.value
@@ -398,4 +403,317 @@ class QAPSystem(BaseObject):
 
 
 qap = QAPSystem.from_r1cs_system(F, r1cs)
-assert qap.is_valid_assignment(S)
+
+from copy import deepcopy
+
+class Reference(BaseObject):
+    def __init__(self, namespace, name):
+        self.namespace = namespace
+        self.name      = name
+    
+    def resolve(self):
+        return self.namespace[self.name]
+
+
+class Namespace(BaseObject):
+    def __init__(self, name: str):
+        self.name    = name
+        self.objects = {}
+    
+
+    def __reprdir__(self):
+        return ['name']
+
+    
+    def ref(self, name):
+        return Reference(self, name)
+
+
+    def __getattr__(self, name):
+        try:
+            return object.__getattr__(self, name)
+        except AttributeError as e:
+            try:
+                return self.objects[name]
+            except KeyError:
+                try:
+                    return self.objects[name]
+                except KeyError:
+                    raise e
+
+
+    def __getitem__(self, name):
+        parts = name.split('.', 1)
+        if len(parts) == 1:
+            curr_part, next_part = parts[0], ""
+        else:
+            curr_part, next_part = parts
+
+        curr = self.objects[curr_part]
+        if next_part:
+            return getattr(curr, next_part)
+        else:
+            return curr
+
+
+    def __setitem__(self, name, value):
+        parts = name.split('.', 1)
+        if len(parts) == 1:
+            curr_part, next_part = parts[0], ""
+        else:
+            curr_part, next_part = parts
+
+        if next_part:
+            self.objects[curr_part][next_part] = value
+        else:
+            self.objects[curr_part] = value
+    
+
+    def copy(self, namespace):
+        new_obj = Namespace(self.name)
+        for k,v in self.objects.items():
+            new_obj[k] = v.copy(new_obj)
+        
+        return new_obj
+
+
+
+class ASTObject(BaseObject):
+    def __init__(self, name, els=None):
+        self.name        = name
+        self.els         = els
+        self.in_edges    = []
+        self.out_edges   = []
+        self.parent      = None
+        self._last_built = None
+
+
+    def __reprdir__(self):
+        return ['name']
+
+
+    def set(self, other: 'ASTObject'):
+        self.in_edges.append(other.parent.namespace.ref(other.name))
+        other.out_edges.append(self.parent.namespace.ref(self.name))
+    
+
+    def build(self):
+        if not self._last_built:
+            self._last_built = self.force_build()
+        
+        return self._last_built
+
+
+    def clear_build(self):
+        self._last_built = None
+    
+
+    def copy(self, namespace):
+        new_obj = self.__class__(name=self.name, els=self.els)
+        new_obj.in_edges  = [namespace.ref(e.name) for e in self.in_edges]
+        new_obj.out_edges = [namespace.ref(e.name) for e in self.out_edges]
+        return new_obj
+
+
+class Input(ASTObject):
+    def force_build(self):
+        # If wired from another component, can only have ONE incoming
+        # Otherwise, zero
+        assert len(self.in_edges) < 2
+        if self.in_edges:
+            return self.in_edges[0].resolve().build()
+        else:
+            node = Source(Label(self.name), self.els)
+            self._last_built = node
+
+            for out_edge in self.out_edges:
+                out_node = out_edge.resolve().build()
+
+                if out_node not in node.out_nodes:
+                    node.add_out_edge(out_node)
+
+            return node
+
+
+class Output(ASTObject):
+    def force_build(self):
+        assert len(self.in_edges) == 1
+        if self.out_edges:
+            return self.in_edges[0].resolve().build()
+        else:
+            node = Sink(Label(self.name), self.els)
+            self._last_built = node
+
+            in_node = self.in_edges[0].resolve().build()
+            if in_node not in node.in_nodes:
+                node.add_in_edge(in_node)
+
+            return node
+
+
+class Template(BaseObject):
+    def __init__(self, name=None, els=None):
+        self.name      = name
+        self.els       = els
+        self.namespace = Namespace(name)
+
+
+    def __getattr__(self, name):
+        try:
+            return object.__getattr__(self, name)
+        except AttributeError as e:
+            try:
+                return self.namespace[name]
+            except KeyError:
+                raise e
+
+
+    def add(self, obj):
+        obj.els    = self.els
+        obj.parent = self
+        self.namespace[obj.name] = obj
+        return obj
+
+
+    def instantiate(self, name, parent=None):
+        els       = parent.els if parent else self.els
+        component = Component(name=name, els=els)
+
+        for k,v in self.namespace.objects.items():
+            new_obj                = v.copy(component.namespace)
+            new_obj.parent         = component
+            component.namespace[k] = new_obj
+
+        if parent:
+            parent.namespace[name] = component
+        
+        return component
+
+
+class Component(BaseObject):
+    def __init__(self, name=None, els=None, namespace=None):
+        self.name      = name
+        self.els       = els
+        self.namespace = namespace or Namespace(name)
+
+
+    def __getattr__(self, name):
+        try:
+            return object.__getattr__(self, name)
+        except AttributeError as e:
+            try:
+                return self.namespace[name]
+            except KeyError:
+                raise e
+
+
+    def _flatten(self):
+        nodes = []
+        for v in self.namespace.objects.values():
+            if type(v) is Component:
+                nodes.extend(v._flatten())
+            else:
+                nodes.append(v.build())
+        return nodes
+    
+
+    def build_circuit(self):
+        return AlgebraicCircuit(self._flatten())
+    
+
+    def copy(self, namespace):
+        new_obj = self.__class__(name=self.name, els=self.els, namespace=self.namespace.copy(namespace))
+        return new_obj
+
+
+class MUL(ASTObject):
+    def force_build(self):
+        assert len(self.in_edges) == 2
+
+        node = MultiplicationGate(Label("*"), self.els)
+        self._last_built = node
+
+        in_l, in_r = [e.resolve().build() for e in self.in_edges]
+
+        if in_l not in node.in_nodes:
+            node.add_in_edge(in_l)
+        
+        if in_r not in node.in_nodes:
+            node.add_in_edge(in_r)
+
+        for out_edge in self.out_edges:
+            out_node = out_edge.resolve().build()
+
+            if out_node not in node.out_nodes:
+                node.add_out_edge(out_node)
+
+        return node
+
+
+els = EdgeLabelSystem()
+
+mul = Template('mul', els)
+a   = mul.add(Input('a'))
+b   = mul.add(Input('b'))
+c   = mul.add(Output('c'))
+m   = mul.add(MUL('*1'))
+m.set(a)
+m.set(b)
+c.set(m)
+
+
+fac3 = Template('fac3', els)
+x1   = fac3.add(Input('x1'))
+x2   = fac3.add(Input('x2'))
+x3   = fac3.add(Input('x3'))
+x4   = fac3.add(Output('x4'))
+
+mul1 = mul.instantiate('mul1', fac3)
+mul2 = mul.instantiate('mul2', fac3)
+
+mul1.a.set(x1)
+mul1.b.set(x2)
+
+mul2.a.set(mul1.c)
+mul2.b.set(x3)
+x4.set(mul2.c)
+
+main = fac3.instantiate('main')
+
+
+
+# Solve
+# circuit = C.build_circuit()
+# r1cs    = circuit.build_r1cs_system()
+
+# x1.set_value(F(7))
+# x2.set_value(F(3))
+# x3.set_value(F(2))
+# res = circuit.execute()
+# S   = C.els.build_solution_vector(res)
+
+
+"""
+template Multiplier() {
+    signal input a ;
+    signal input b ;
+    signal output c ;
+    c <== a*b ;
+}
+
+template three_fac() {
+    signal input x1 ;
+    signal input x2 ;
+    signal input x3 ;
+    signal output x4 ;
+    component mult1 = Multiplier() ;
+    component mult2 = Multiplier() ;
+    mult1.a <== x1 ;
+    mult1.b <== x2 ;
+    mult2.a <== mult1.c ;
+    mult2.b <== x3 ;
+    x4 <== mult2.c ;
+}
+
+component main = three_fac()
+"""
