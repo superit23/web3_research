@@ -409,7 +409,7 @@ class QAPSystem(BaseObject):
         B = sum([b*v for b,v in zip(self.Bx, [1] + S)])
         C = sum([c*v for c,v in zip(self.Cx, [1] + S)])
 
-        return (A * B - C) % self.T == P(0)
+        return (A * B - C) % self.T == self.T.ring(0)
 
 
 qap = QAPSystem.from_r1cs_system(F, r1cs)
@@ -853,17 +853,11 @@ class Program(BaseObject):
         self.templates  = {k:v for k,v in context.items() if type(v) is Template}
         self.components = {k:v for k,v in context.items() if type(v) is Component}
     
-    def build(self):
+    def build(self, F: 'Field'):
         circuit = self.components['main'].build_circuit()
         r1cs    = circuit.build_r1cs_system()
+        return circuit, QAPSystem.from_r1cs_system(F, r1cs)
 
-        circuit['x1'].set_value(F(7))
-        circuit['x2'].set_value(F(3))
-        circuit['x3'].set_value(F(2))
-        res = circuit.execute()
-        S   = main.els.build_solution_vector(res)
-
-        return r1cs.is_valid_assignment(S)
 
 import re
 from enum import Enum, auto
@@ -1072,3 +1066,31 @@ template three_fac() {
 
 component main = three_fac()
 """
+
+# Lexer -> ASG -> Algebraic Circuit -> R1CS -> QAP
+l            = Lexer()
+prog         = l.lex(source)
+circuit, qap = prog.build(F)
+
+# Check if circuit execution and QAP works
+circuit['x1'].set_value(F(7))
+circuit['x2'].set_value(F(3))
+circuit['x3'].set_value(F(2))
+res = circuit.execute()
+S   = main.els.build_solution_vector(res)
+
+assert qap.is_valid_assignment(S)
+
+
+# Make sure it doesn't if the solution is wrong
+S_bad = [e for e in S]
+S_bad[0]  = F(1)
+assert not qap.is_valid_assignment(S_bad)
+
+
+# TODO
+# ---------
+# Add addition to ASG
+# Add addition to Lexer
+# Test Lexer against more complicated Circom programs
+# Implement with BN-254 pairing group
