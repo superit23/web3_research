@@ -93,6 +93,8 @@ class EdgeLabelSystem(BaseObject):
                 if l.rep == rep:
                     return l
 
+        raise KeyError
+
 
     def build_solution_vector(self, sol: 'Dict[Label, FieldElement]'):
         values = [0]*len(self.labels)
@@ -286,6 +288,14 @@ class AlgebraicCircuit(BaseObject):
         self.nodes = nodes
     
 
+    def __getitem__(self, name):
+        for n in self.nodes:
+            if n.label.rep == name:
+                return n
+        
+        raise KeyError
+
+
     def execute(self):
         results = {}
         for n in self.nodes:
@@ -412,24 +422,34 @@ class Reference(BaseObject):
         self.name      = name
     
     def resolve(self):
-        return self.namespace[self.name]
+        containing_ns = self.namespace.get_namespace_by_rns(self.name.rsplit('.', 1)[0])
+        return containing_ns[self.name.rsplit('.', 1)[1]]
 
 
 class Namespace(BaseObject):
     def __init__(self, name: str, parent=None):
-        self.name    = name
-        self.objects = {}
-        self.parent  = parent
+        self.name     = name
+        self.objects  = {}
+        self.children = {}
+        self.parent   = parent
+    
+
+    def create_or_get_childspace(self, name):
+        if not name in self.children:
+            namespace = Namespace(name, self)
+            self.children[name] = namespace
+
+        return self.children[name]
 
 
     def get_fqns(self):
-        if self.parent and self.parent.parent:
-            return f'{self.parent.parent.namespace.get_fqns()}.{self.name}'
+        if self.parent:
+            return f'{self.parent.get_fqns()}.{self.name}'
         else:
             return self.name
 
 
-    def get_namespace_by_rns(self, rns: str):
+    def get_namespace_by_rns(self, rns: str, force_create: bool=False):
         """
         Traverses the namespace tree by its relative name.
         """
@@ -445,14 +465,21 @@ class Namespace(BaseObject):
         # fqns: 'main.mul'
         # rns:  'main.mul.doit'
         elif rns.startswith(fqns):
-            return self[rns.split(fqns)[1].strip('.')].namespace
+            child_space = rns.split(fqns)[1].strip('.')
+            try:
+                return self.children[child_space]
+            except KeyError as e:
+                if force_create:
+                    return self.create_or_get_childspace(child_space)
+
+                raise e
         
 
         # The RNS refers to a lower relative namespace
         # fqns: 'main'
         # rns:  'mul'
-        elif rns in self.objects:
-            return self[rns].namespace
+        elif rns in self.children:
+            return self.children[rns]
 
         # The RNS refers to a higher namespace or different namespace on the same level
         # fqns: 'main.mul.doit'
@@ -461,7 +488,10 @@ class Namespace(BaseObject):
         # fqns: 'main.mul.doit1'
         # rns:  'main.mul.doit2'
         elif self.parent:
-            return self.parent.parent.namespace.get_namespace_by_rns(rns)
+            return self.parent.get_namespace_by_rns(rns, force_create)
+
+        elif force_create:
+            return self.create_or_get_childspace(rns)
 
         raise RuntimeError("Cannot traverse further; no higher parent")
 
@@ -472,7 +502,7 @@ class Namespace(BaseObject):
 
     
     def ref(self, name):
-        return Reference(self, name)
+        return Reference(self, f'{self.get_fqns()}.{name}')
 
 
     def __getattr__(self, name):
@@ -480,7 +510,7 @@ class Namespace(BaseObject):
             return object.__getattr__(self, name)
         except AttributeError as e:
             try:
-                return self.objects[name]
+                return self.children[name]
             except KeyError:
                 try:
                     return self.objects[name]
@@ -516,8 +546,7 @@ class Namespace(BaseObject):
     
 
     def copy(self, parent, namespace, ns_translation):
-        print(self.__class__, self, namespace)
-        new_obj = Namespace(self.name, parent)
+        new_obj = namespace.create_or_get_childspace(self.name)
         for k,v in self.objects.items():
             new_obj[k] = v.copy(parent, new_obj, ns_translation)
         
@@ -556,30 +585,26 @@ class ASTObject(BaseObject):
 
 
     def copy(self, parent, namespace, ns_translation):
-        print(self.__class__, self, namespace)
         new_obj = self.__class__(name=self.name, els=self.els)
 
-        # Make sure that nodes from other namespaces are correctly wired
-        in_edges = []
-        if self.name == 'x1':
-            raise RuntimeError
-        for ref in self.in_edges:
-            curr_name = ns_translation.get(ref.namespace.name, ref.namespace.name)
-            ref_ns    = namespace.get_namespace_by_rns(curr_name)
-            in_edges.append(ref_ns.ref(ref.name))
+        def translate_edges(edges):
+            new_edges = []
+            for ref in edges:
+                # Translate FQNS
+                new_parts = []
+                for part in ref.name.split('.')[:-1]:
+                    new_parts.append(ns_translation.get(part, part))
+                
+                # Recreate in new namespace tree
+                new_fqns = '.'.join(new_parts)
+                ref_ns   = namespace.get_namespace_by_rns(new_fqns, force_create=True)
+                new_ref  = ref_ns.ref(ref.name.split('.')[-1])
+                new_edges.append(new_ref)
 
-        out_edges = []
-        for ref in self.out_edges:
-            curr_name = ns_translation.get(ref.namespace.name, ref.namespace.name)
-            ref_ns    = namespace.get_namespace_by_rns(curr_name)
-            out_edges.append(ref_ns.ref(ref.name))
+            return new_edges
 
-
-        new_obj.in_edges  = in_edges
-        new_obj.out_edges = out_edges
-
-        # new_obj.in_edges  = [namespace.ref(e.name) for e in self.in_edges] # TODO: THIS IS WRONG WHEN THERE'S NODES FROM OTHER NAMESPACES
-        # new_obj.out_edges = [namespace.ref(e.name) for e in self.out_edges]
+        new_obj.in_edges  = translate_edges(self.in_edges)
+        new_obj.out_edges = translate_edges(self.out_edges)
         new_obj.parent    = parent
         return new_obj
 
@@ -598,7 +623,7 @@ class Input(ASTObject):
             for out_edge in self.out_edges:
                 out_node = out_edge.resolve().build()
 
-                if out_node not in node.out_nodes:
+                if out_node != node and out_node not in node.out_nodes:
                     node.add_out_edge(out_node)
 
             return node
@@ -639,17 +664,17 @@ class MUL(ASTObject):
         for out_edge in self.out_edges:
             out_node = out_edge.resolve().build()
 
-            if out_node not in node.out_nodes:
+            if out_node != node and out_node not in node.out_nodes:
                 node.add_out_edge(out_node)
 
         return node
 
-RESULTS = []
+
 class Template(BaseObject):
     def __init__(self, name=None, els=None):
         self.name      = name
         self.els       = els
-        self.namespace = Namespace(name, self)
+        self.namespace = Namespace(name)
         self.parent    = None
 
 
@@ -671,21 +696,23 @@ class Template(BaseObject):
 
 
     def instantiate(self, name, parent=None):
-        els            = parent.els if parent else self.els
-        component      = Component(name=name, els=els)
+        els = parent.els if parent else self.els
+
+        # Create a child namespace if we have a parent
+        if parent:
+            namespace = parent.namespace.create_or_get_childspace(name)
+        else:
+            namespace = Namespace(name)
+
+        component      = Component(name=name, els=els, namespace=namespace)
         ns_translation = {self.namespace.name: name}
 
         if parent:
             parent.namespace[name] = component
 
-        print(ns_translation, component.namespace)
-        global RESULTS
-        RESULTS.append(component)
-
         # Do components first to prevent dependency issues
         for k,v in self.namespace.objects.items():
             if v.is_a(Component):
-                print(component.namespace.objects)
                 new_obj                = v.copy(component, component.namespace, ns_translation)
                 component.namespace[k] = new_obj
 
@@ -701,7 +728,7 @@ class Component(BaseObject):
     def __init__(self, name=None, els=None, namespace=None, parent=None):
         self.name      = name
         self.els       = els
-        self.namespace = namespace or Namespace(name, self)
+        self.namespace = namespace
         self.parent    = parent
 
 
@@ -722,7 +749,7 @@ class Component(BaseObject):
                 nodes.extend(v._flatten())
             else:
                 nodes.append(v.build())
-        return nodes
+        return list(set(nodes))
 
 
     def build_circuit(self):
@@ -730,12 +757,10 @@ class Component(BaseObject):
 
 
     def copy(self, parent, namespace, ns_translation):
-        print(self.__class__, self, namespace)
-        new_obj                  = self.__class__(name=self.name, els=self.els)
-        namespace[self.name]     = self
-        new_obj.parent           = parent
-        new_obj.namespace        = self.namespace.copy(new_obj, namespace, ns_translation)
-        new_obj.namespace.parent = new_obj
+        new_obj              = self.__class__(name=self.name, els=self.els)
+        namespace[self.name] = self
+        new_obj.parent       = parent
+        new_obj.namespace    = self.namespace.copy(new_obj, namespace, ns_translation)
         return new_obj
 
 
@@ -746,7 +771,7 @@ mul = Template('mul', els)
 a   = mul.add(Input('a'))
 b   = mul.add(Input('b'))
 c   = mul.add(Output('c'))
-m   = mul.add(MUL('*1'))
+m   = mul.add(MUL('m'))
 m.set(a)
 m.set(b)
 c.set(m)
@@ -771,17 +796,56 @@ x4.set(mul2.c)
 main = fac3.instantiate('main')
 
 
+# Assert main connections
+assert not main.x1.in_edges
+assert not main.x2.in_edges
+assert not main.x3.in_edges
+assert not main.x4.out_edges
+
+assert len(main.x1.out_edges) == 1 and main.x1.out_edges[0].resolve() == main.mul1.a
+assert len(main.x2.out_edges) == 1 and main.x2.out_edges[0].resolve() == main.mul1.b
+assert len(main.x2.out_edges) == 1 and main.x3.out_edges[0].resolve() == main.mul2.b
+assert len(main.x4.in_edges) == 1 and main.x4.in_edges[0].resolve() == main.mul2.c
+
+# Assert mul1 connections
+assert len(main.mul1.a.in_edges) == 1 and main.mul1.a.in_edges[0].resolve() == main.x1
+assert len(main.mul1.a.out_edges) == 1 and main.mul1.a.out_edges[0].resolve() == main.mul1.m
+
+assert len(main.mul1.b.in_edges) == 1 and main.mul1.b.in_edges[0].resolve() == main.x2
+assert len(main.mul1.b.out_edges) == 1 and main.mul1.b.out_edges[0].resolve() == main.mul1.m
+
+assert len(main.mul1.m.in_edges) == 2 and main.mul1.m.in_edges[0].resolve() in (main.mul1.a, main.mul1.b) and main.mul1.m.in_edges[1].resolve() in (main.mul1.a, main.mul1.b)
+assert len(main.mul1.m.out_edges) == 1 and main.mul1.m.out_edges[0].resolve() == main.mul1.c
+
+assert len(main.mul1.c.in_edges) == 1 and main.mul1.c.in_edges[0].resolve() == main.mul1.m
+assert len(main.mul1.c.out_edges) == 1 and main.mul1.c.out_edges[0].resolve() == main.mul2.a
+
+
+# Assert mul2 connections
+assert len(main.mul2.a.in_edges) == 1 and main.mul2.a.in_edges[0].resolve() == main.mul1.c
+assert len(main.mul2.a.out_edges) == 1 and main.mul2.a.out_edges[0].resolve() == main.mul2.m
+
+assert len(main.mul2.b.in_edges) == 1 and main.mul2.b.in_edges[0].resolve() == main.x3
+assert len(main.mul2.b.out_edges) == 1 and main.mul2.b.out_edges[0].resolve() == main.mul2.m
+
+assert len(main.mul2.m.in_edges) == 2 and main.mul2.m.in_edges[0].resolve() in (main.mul2.a, main.mul1.b) and main.mul2.m.in_edges[1].resolve() in (main.mul2.a, main.mul2.b)
+assert len(main.mul2.m.out_edges) == 1 and main.mul2.m.out_edges[0].resolve() == main.mul2.c
+
+assert len(main.mul2.c.in_edges) == 1 and main.mul2.c.in_edges[0].resolve() == main.mul2.m
+assert len(main.mul2.c.out_edges) == 1 and main.mul2.c.out_edges[0].resolve() == main.x4
+
 
 # Solve
-# circuit = C.build_circuit()
-# r1cs    = circuit.build_r1cs_system()
+circuit = main.build_circuit()
+r1cs    = circuit.build_r1cs_system()
 
-# x1.set_value(F(7))
-# x2.set_value(F(3))
-# x3.set_value(F(2))
-# res = circuit.execute()
-# S   = C.els.build_solution_vector(res)
+circuit['x1'].set_value(F(7))
+circuit['x2'].set_value(F(3))
+circuit['x3'].set_value(F(2))
+res = circuit.execute()
+S   = main.els.build_solution_vector(res)
 
+assert r1cs.is_valid_assignment(S)
 
 """
 template Multiplier() {
