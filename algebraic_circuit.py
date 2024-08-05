@@ -375,7 +375,7 @@ class QAPSystem(BaseObject):
 
 
     @staticmethod
-    def from_r1cs_system(F: 'Field', r1cs: R1CSSystem):
+    def from_r1cs_system(F: 'Field', r1cs: R1CSSystem, m: 'List[FieldElement]'=None):
         # Set up some vars
         k     = len(r1cs.constraints)
         nm    = len(r1cs.constraints[0].ai)
@@ -383,7 +383,7 @@ class QAPSystem(BaseObject):
 
         Fm    = F.mul_group()
         G     = Fm.find_gen()
-        m     = [G*j for j in range(1,k+1)]
+        m     = m or [G*j for j in range(1,k+1)]
         x     = Symbol('x')
         P     = F[x]
         T     = product([(x-ml) for ml in m])
@@ -404,12 +404,19 @@ class QAPSystem(BaseObject):
         return QAPSystem(T, Ax, Bx, Cx)
 
 
-    def is_valid_assignment(self, S: list):
+    def P(self, S):
         A = sum([a*v for a,v in zip(self.Ax, [1] + S)])
         B = sum([b*v for b,v in zip(self.Bx, [1] + S)])
         C = sum([c*v for c,v in zip(self.Cx, [1] + S)])
 
-        return (A * B - C) % self.T == self.T.ring(0)
+        return (A * B - C)
+    
+
+    def H(self, S):
+        return self.P(S) // self.T
+
+    def is_valid_assignment(self, S: list):
+        return self.P(S) % self.T == self.T.ring(0)
 
 
 qap = QAPSystem.from_r1cs_system(F, r1cs)
@@ -645,12 +652,14 @@ class Output(ASTObject):
             return node
 
 
+class BinaryOperator(ASTObject):
+    GATE  = None
+    LABEL = None
 
-class MUL(ASTObject):
     def force_build(self):
         assert len(self.in_edges) == 2
 
-        node = MultiplicationGate(Label("*"), self.els)
+        node = self.GATE(Label(self.LABEL), self.els)
         self._last_built = node
 
         in_l, in_r = [e.resolve().build() for e in self.in_edges]
@@ -668,6 +677,14 @@ class MUL(ASTObject):
                 node.add_out_edge(out_node)
 
         return node
+
+class MUL(BinaryOperator):
+    GATE  = MultiplicationGate
+    LABEL = "*"
+
+class ADD(ASTObject):
+    GATE  = AdditionGate
+    LABEL = "*"
 
 
 class Template(BaseObject):
@@ -868,8 +885,10 @@ TEMPLATE_START_RE = re.compile(rf'template[ ]+{CALL_RE}')
 INPUT_RE          = re.compile(rf'signal input {NAME_RE}')
 OUTPUT_RE         = re.compile(rf'signal output {NAME_RE}')
 ASSIGN_RE         = re.compile(r'([a-zA-Z0-9\.]+)[ ]*<==[ ]*(.*)')
+CONSTRAIN_RE      = re.compile(r'([a-zA-Z0-9\.]+)[ ]*===[ ]*(.*)')
 COMPONENT_RE      = re.compile(rf'component {NAME_RE} = {CALL_RE}')
 MUL_RE            = re.compile(rf'{NAME_RE}[ ]*\*[ ]*{NAME_RE}')
+ADD_RE            = re.compile(rf'{NAME_RE}[ ]*\+[ ]*{NAME_RE}')
 VAR_RE            = re.compile(NAME_RE)
 
 ALL_RE = [TEMPLATE_START_RE, INPUT_RE, OUTPUT_RE, ASSIGN_RE, COMPONENT_RE, MUL_RE]
@@ -1083,8 +1102,8 @@ assert qap.is_valid_assignment(S)
 
 
 # Make sure it doesn't if the solution is wrong
-S_bad = [e for e in S]
-S_bad[0]  = F(1)
+S_bad    = [e for e in S]
+S_bad[0] = F(1)
 assert not qap.is_valid_assignment(S_bad)
 
 
@@ -1094,3 +1113,98 @@ assert not qap.is_valid_assignment(S_bad)
 # Add addition to Lexer
 # Test Lexer against more complicated Circom programs
 # Implement with BN-254 pairing group
+
+
+library = """
+template subtract() {
+    signal input a ;
+    signal input b ;
+    signal output c ;
+    c <== a+1*b ;
+}
+template check_inv() {
+    signal input a ;
+    signal input b ;
+    a*b === 1 ;
+}
+template divide() {
+    signal input a ;
+    signal input b ;
+    signal input b_inv ;
+    signal output c ;
+    component c_inv = check_inv() ;
+    c_inv.a <== b
+    c_inv.b <== b_inv
+    c <== a*b_inv
+}
+template check_bool() {
+    signal input a ;
+    a*(1-a) === 0 ;
+}
+template conditional() {
+    signal input a ;
+    signal input b ;
+    signal input switch ;
+    signal output c ;
+    component c_bool = check_bool() ;
+    c <== a*switch + (1-switch)*b ;
+}"""
+
+
+# Compile 3fac problem into QAP
+Fr = ZZ/ZZ(13)
+I  = [Fr(11)]
+W  = [Fr(2), Fr(3), Fr(4), Fr(6)]
+
+system = R1CSSystem([
+    R1CSConstraint(
+        [Fr(0), Fr(0), Fr(1), Fr(0), Fr(0), Fr(0)],
+        [Fr(0), Fr(0), Fr(0), Fr(1), Fr(0), Fr(0)],
+        [Fr(0), Fr(0), Fr(0), Fr(0), Fr(0), Fr(1)]
+    ),
+    R1CSConstraint(
+        [Fr(0), Fr(0), Fr(0), Fr(0), Fr(0), Fr(1)],
+        [Fr(0), Fr(0), Fr(0), Fr(0), Fr(1), Fr(0)],
+        [Fr(0), Fr(1), Fr(0), Fr(0), Fr(0), Fr(0)]
+    )
+])
+
+qap = QAPSystem.from_r1cs_system(Fr, system, m=(Fr(5), Fr(7)))
+
+# Use compiled QAP to generate zk-SNARK
+n,m = len(I), len(W)
+F   = ZZ/ZZ(43)
+E   = EllipticCurve(F(0), F(6))
+
+# Simulation trapdoor
+ST = (int(Fr(6)), int(Fr(5)), int(Fr(4)), int(Fr(3)), int(Fr(2)))
+alpha, beta, gamma, delta, tau = ST
+
+# Build g1, g2 on the extension curve
+y     = Symbol('y')
+P     = F[y]
+F43_6 = FF(43, 6, reducing_poly=y**6 + 6)
+
+E6 = EllipticCurve(F43_6(E.a), F43_6(E.b))
+g1 = E6(13, 15)
+g2 = E6(7*y**2, 16*y**3)
+
+# Calculate CRS
+CRS_G1_0 = g1*alpha, g1*beta, g1*delta
+CRS_G1_1 = [g1*(tau**j) for j in range(qap.T.degree())]
+CRS_G1_2 = [g1*int((beta*qap.Ax[j](tau) + alpha*qap.Bx[j](tau) + qap.Cx[j](tau)) / gamma) for j in range(n+1)]
+CRS_G1_3 = [g1*int((beta*qap.Ax[j+n](tau) + alpha*qap.Bx[j+n](tau) + qap.Cx[j+n](tau)) / delta) for j in range(1,m+1)]
+CRS_G1_4 = [g1*int((tau**j * qap.T(tau)) / delta) for j in range(qap.T.degree()-1)]
+
+CRS_G1 = (CRS_G1_0, CRS_G1_1, CRS_G1_2, CRS_G1_3, CRS_G1_4)
+CRS_G2 = g2*beta, g2*gamma, g2*delta, [g2*int(tau**j) for j in range(qap.T.degree())]
+
+# Prover
+r,t = Fr(11), Fr(4) #[Fr.random() for _ in range(2)]
+g1W = sum([g1P*int(w) for g1P, w in zip(CRS_G1_3, W)], E6.zero)
+g1A = CRS_G1_0[0] + sum([g1*int(A(tau)*s) for A, s in zip(qap.Ax, ([0]+I+W))], E6.zero) + CRS_G1_0[-1]*int(r)
+g1B = CRS_G1_0[1] + sum([g1*int(B(tau)*s) for B, s in zip(qap.Bx, ([0]+I+W))], E6.zero) + CRS_G1_0[-1]*int(t)
+g2B = CRS_G2[0] + sum([g2*int(B(tau)*s) for B, s in zip(qap.Bx, ([0]+I+W))], E6.zero) + CRS_G2[2]*int(t)
+g1C = g1W + g1*int((qap.H(I + W)(tau)*qap.T(tau))/delta) + g1A*int(t) + g1B*int(r) + CRS_G1_0[-1]*int(-r*t)
+
+proof = (g1A, g1C, g2B)
