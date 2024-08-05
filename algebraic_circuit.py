@@ -678,13 +678,14 @@ class BinaryOperator(ASTObject):
 
         return node
 
+
 class MUL(BinaryOperator):
     GATE  = MultiplicationGate
     LABEL = "*"
 
-class ADD(ASTObject):
+class ADD(BinaryOperator):
     GATE  = AdditionGate
-    LABEL = "*"
+    LABEL = "+"
 
 
 class Template(BaseObject):
@@ -1208,3 +1209,204 @@ g2B = CRS_G2[0] + sum([g2*int(B(tau)*s) for B, s in zip(qap.Bx, ([0]+I+W))], E6.
 g1C = g1W + g1*int((qap.H(I + W)(tau)*qap.T(tau))/delta) + g1A*int(t) + g1B*int(r) + CRS_G1_0[-1]*int(-r*t)
 
 proof = (g1A, g1C, g2B)
+
+assert g1A == E6(35, 15)
+assert g1C == E6(13, 28)
+assert g2B == E6(7*y**2, 27*y**3)
+
+
+
+class Groth16Parameters(BaseObject):
+    def __init__(self, G1, G2, g1, g2, Fr):
+        self.G1 = G1
+        self.G2 = G2
+        self.g1 = g1
+        self.g2 = g2
+        self.Fr = Fr
+
+
+class SimulationTrapdoor(BaseObject):
+    def __init__(self, alpha, beta, gamma, delta, tau):
+        self.alpha = int(alpha)
+        self.beta  = int(beta)
+        self.gamma = int(gamma)
+        self.delta = int(delta)
+        self.tau   = int(tau)
+    
+
+    @staticmethod
+    def generate(Fr: 'Field') -> 'SimulationTrapdoor':
+        Frm = Fr.mul_group()
+        st  = set()
+        
+        while len(st) < 5:
+            st.add(Frm.random())
+
+        return SimulationTrapdoor(*list(st))
+
+
+
+class CRS(BaseObject):
+    def __init__(self, qap, CRS_G1, CRS_G2, params: 'Groth16Parameters'):
+        self.qap    = qap
+        self.CRS_G1 = CRS_G1
+        self.CRS_G2 = CRS_G2
+        self.params = params
+
+
+    @staticmethod
+    def generate(qap: QAPSystem, params: Groth16Parameters, st: SimulationTrapdoor, num_instances: int) -> 'CRS':
+        g1, g2 = params.g1, params.g2
+        n, m   = num_instances, len(qap.Ax)-num_instances-1
+
+        CRS_G1_0 = g1*st.alpha, g1*st.beta, g1*st.delta
+        CRS_G1_1 = [g1*(st.tau**j) for j in range(qap.T.degree())]
+        CRS_G1_2 = [g1*int((st.beta*qap.Ax[j](st.tau) + st.alpha*qap.Bx[j](st.tau) + qap.Cx[j](st.tau)) / st.gamma) for j in range(n+1)]
+        CRS_G1_3 = [g1*int((st.beta*qap.Ax[j+n](st.tau) + st.alpha*qap.Bx[j+n](st.tau) + qap.Cx[j+n](st.tau)) / st.delta) for j in range(1,m+1)]
+        CRS_G1_4 = [g1*int((st.tau**j * qap.T(st.tau)) / st.delta) for j in range(qap.T.degree()-1)]
+
+        CRS_G1 = (CRS_G1_0, CRS_G1_1, CRS_G1_2, CRS_G1_3, CRS_G1_4)
+        CRS_G2 = g2*st.beta, g2*st.gamma, g2*st.delta, [g2*int(st.tau**j) for j in range(qap.T.degree())]
+
+        return CRS(qap, CRS_G1, CRS_G2, params)
+
+
+    def _eval_tau(self, P, pot):
+        return sum([g_tau_j*int(coeff) for coeff, g_tau_j in zip(P, pot)], pot[0].ring.zero)
+
+    def eval_g1_tau(self, P):
+        return self._eval_tau(P, self.CRS_G1[1])
+
+    def eval_g2_tau(self, P):
+        return self._eval_tau(P, self.CRS_G2[3])
+
+    def eval_gT_tau(self, P):
+        return self._eval_tau(P, self.CRS_G1[4])
+
+
+class Groth16Proof(BaseObject):
+    def __init__(self, g1A, g1C, g2B, crs):
+        self.g1A = g1A
+        self.g1C = g1C
+        self.g2B = g2B
+        self.crs = crs
+
+
+    @staticmethod
+    def generate(crs: 'CRS', I: list, W: list, r: 'FieldElement'=None, t: 'FieldElement'=None) -> 'Groth16Proof':
+        r = r or Fr.random()
+        t = t or Fr.random()
+
+        g1_alpha = crs.CRS_G1[0][0]
+        g1_beta  = crs.CRS_G1[0][1]
+        g1_delta = crs.CRS_G1[0][-1]
+
+        g2_beta  = crs.CRS_G2[0]
+        g2_delta = crs.CRS_G2[2]
+
+        g1W = sum([g1P*int(w) for g1P, w in zip(crs.CRS_G1[3], W)], E6.zero)
+        g1A = g1_alpha + sum([crs.eval_g1_tau(A)*int(s) for A, s in zip(crs.qap.Ax, ([0]+I+W))], E6.zero) + g1_delta*int(r)
+        g1B = g1_beta  + sum([crs.eval_g1_tau(B)*int(s) for B, s in zip(crs.qap.Bx, ([0]+I+W))], E6.zero) + g1_delta*int(t)
+        g2B = g2_beta  + sum([crs.eval_g2_tau(B)*int(s) for B, s in zip(crs.qap.Bx, ([0]+I+W))], E6.zero) + g2_delta*int(t)
+        g1C = g1W + crs.eval_gT_tau(crs.qap.H(I + W)) + g1A*int(t) + g1B*int(r) + g1_delta*int(-r*t)
+
+        return Groth16Proof(g1A, g1C, g2B, crs)
+    
+
+    def verify(self, I: list):
+        g1_alpha = self.crs.CRS_G1[0][0]
+        g1_beta  = self.crs.CRS_G1[0][1]
+        g1_delta = self.crs.CRS_G1[0][-1]
+
+        g2_beta  = self.crs.CRS_G2[0]
+        g2_gamma = self.crs.CRS_G2[1]
+        g2_delta = self.crs.CRS_G2[2]
+
+        def e(g1, g2):
+            return g1.weil_pairing(g2, g1.order())
+
+        g1_I = sum([g1_g*int(i) for g1_g, i in zip(self.crs.CRS_G1[2], [0]+I)], self.crs.params.G2.zero)
+
+        return e(self.g1A, self.g2B) == e(g1_alpha, g2_beta) * e(g1_I, g2_gamma) * e(self.g1C, g2_delta)
+
+
+# Compile 3fac problem into QAP
+Fr = ZZ/ZZ(13)
+I  = [Fr(11)]
+W  = [Fr(2), Fr(3), Fr(4), Fr(6)]
+
+system = R1CSSystem([
+    R1CSConstraint(
+        [Fr(0), Fr(0), Fr(1), Fr(0), Fr(0), Fr(0)],
+        [Fr(0), Fr(0), Fr(0), Fr(1), Fr(0), Fr(0)],
+        [Fr(0), Fr(0), Fr(0), Fr(0), Fr(0), Fr(1)]
+    ),
+    R1CSConstraint(
+        [Fr(0), Fr(0), Fr(0), Fr(0), Fr(0), Fr(1)],
+        [Fr(0), Fr(0), Fr(0), Fr(0), Fr(1), Fr(0)],
+        [Fr(0), Fr(1), Fr(0), Fr(0), Fr(0), Fr(0)]
+    )
+])
+
+qap = QAPSystem.from_r1cs_system(Fr, system, m=(Fr(5), Fr(7)))
+st  = SimulationTrapdoor(Fr(6), Fr(5), Fr(4), Fr(3), Fr(2))
+
+# Build curves
+F   = ZZ/ZZ(43)
+E   = EllipticCurve(F(0), F(6))
+
+y     = Symbol('y')
+P     = F[y]
+F43_6 = FF(43, 6, reducing_poly=y**6 + 6)
+
+E6 = EllipticCurve(F43_6(E.a), F43_6(E.b))
+g1 = E6(13, 15)
+g2 = E6(7*y**2, 16*y**3)
+
+params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
+crs    = CRS.generate(qap, params, st, num_instances=len(I))
+proof  = Groth16Proof.generate(crs, I, W, r=Fr(11), t=Fr(4))
+
+assert proof.g1A == E6(35, 15)
+assert proof.g1C == E6(13, 28)
+assert proof.g2B == E6(7*y**2, 27*y**3)
+
+assert proof.verify(I)
+assert not proof.verify([Fr(3)])
+
+
+# ALTOGETHER!
+
+# Lexer -> ASG -> Algebraic Circuit -> R1CS -> QAP
+l            = Lexer()
+prog         = l.lex(source)
+circuit, qap = prog.build(Fr)
+
+# Check if circuit execution and QAP works
+circuit['x1'].set_value(Fr(7))
+circuit['x2'].set_value(Fr(3))
+circuit['x3'].set_value(Fr(2))
+res = circuit.execute()
+S   = main.els.build_solution_vector(res)
+
+I, W = S[:1], S[1:]
+
+# Build SNARK
+st  = SimulationTrapdoor(Fr(6), Fr(5), Fr(4), Fr(3), Fr(2))
+F   = ZZ/ZZ(43)
+E   = EllipticCurve(F(0), F(6))
+
+y     = Symbol('y')
+P     = F[y]
+F43_6 = FF(43, 6, reducing_poly=y**6 + 6)
+
+E6 = EllipticCurve(F43_6(E.a), F43_6(E.b))
+g1 = E6(13, 15)
+g2 = E6(7*y**2, 16*y**3)
+
+params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
+crs    = CRS.generate(qap, params, st, num_instances=len(I))
+proof  = Groth16Proof.generate(crs, I, W, r=Fr(11), t=Fr(4))
+
+assert proof.verify(I)
+assert not proof.verify([Fr(3)])
