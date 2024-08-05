@@ -114,7 +114,7 @@ class Web3TestCases(TestCase):
 
         # Check to see if example works
         S = els.build_solution_vector({els['W1']: F(2), els['W2']: F(3), els['W3']: F(4), els['W4']: F(6), els['I1']: F(11)})
-        assert r1cs.is_valid_assignment(S)
+        self.assertTrue(r1cs.is_valid_assignment(S))
 
         # Try custom trace
         x1.set_value(F(7))
@@ -123,7 +123,7 @@ class Web3TestCases(TestCase):
 
         res = circuit.execute()
         S   = els.build_solution_vector(res)
-        assert r1cs.is_valid_assignment(S)
+        self.assertTrue(r1cs.is_valid_assignment(S))
 
 
 
@@ -160,42 +160,42 @@ class Web3TestCases(TestCase):
 
 
         # Assert main connections
-        assert not main.x1.in_edges
-        assert not main.x2.in_edges
-        assert not main.x3.in_edges
-        assert not main.x4.out_edges
+        self.assertTrue(not main.x1.in_edges)
+        self.assertTrue(not main.x2.in_edges)
+        self.assertTrue(not main.x3.in_edges)
+        self.assertTrue(not main.x4.out_edges)
 
-        assert len(main.x1.out_edges) == 1 and main.x1.out_edges[0].resolve() == main.mul1.a
-        assert len(main.x2.out_edges) == 1 and main.x2.out_edges[0].resolve() == main.mul1.b
-        assert len(main.x2.out_edges) == 1 and main.x3.out_edges[0].resolve() == main.mul2.b
-        assert len(main.x4.in_edges) == 1 and main.x4.in_edges[0].resolve() == main.mul2.c
+        self.assertTrue(len(main.x1.out_edges) == 1 and main.x1.out_edges[0].resolve() == main.mul1.a)
+        self.assertTrue(len(main.x2.out_edges) == 1 and main.x2.out_edges[0].resolve() == main.mul1.b)
+        self.assertTrue(len(main.x2.out_edges) == 1 and main.x3.out_edges[0].resolve() == main.mul2.b)
+        self.assertTrue(len(main.x4.in_edges) == 1 and main.x4.in_edges[0].resolve() == main.mul2.c)
 
         # Assert mul1 connections
-        assert len(main.mul1.a.in_edges) == 1 and main.mul1.a.in_edges[0].resolve() == main.x1
-        assert len(main.mul1.a.out_edges) == 1 and main.mul1.a.out_edges[0].resolve() == main.mul1.m
+        self.assertTrue(len(main.mul1.a.in_edges) == 1 and main.mul1.a.in_edges[0].resolve() == main.x1)
+        self.assertTrue(len(main.mul1.a.out_edges) == 1 and main.mul1.a.out_edges[0].resolve() == main.mul1.m)
 
-        assert len(main.mul1.b.in_edges) == 1 and main.mul1.b.in_edges[0].resolve() == main.x2
-        assert len(main.mul1.b.out_edges) == 1 and main.mul1.b.out_edges[0].resolve() == main.mul1.m
+        self.assertTrue(len(main.mul1.b.in_edges) == 1 and main.mul1.b.in_edges[0].resolve() == main.x2)
+        self.assertTrue(len(main.mul1.b.out_edges) == 1 and main.mul1.b.out_edges[0].resolve() == main.mul1.m)
 
-        assert len(main.mul1.m.in_edges) == 2 and main.mul1.m.in_edges[0].resolve() in (main.mul1.a, main.mul1.b) and main.mul1.m.in_edges[1].resolve() in (main.mul1.a, main.mul1.b)
-        assert len(main.mul1.m.out_edges) == 1 and main.mul1.m.out_edges[0].resolve() == main.mul1.c
+        self.assertTrue(len(main.mul1.m.in_edges) == 2 and main.mul1.m.in_edges[0].resolve() in (main.mul1.a, main.mul1.b) and main.mul1.m.in_edges[1].resolve() in (main.mul1.a, main.mul1.b))
+        self.assertTrue(len(main.mul1.m.out_edges) == 1 and main.mul1.m.out_edges[0].resolve() == main.mul1.c)
 
-        assert len(main.mul1.c.in_edges) == 1 and main.mul1.c.in_edges[0].resolve() == main.mul1.m
-        assert len(main.mul1.c.out_edges) == 1 and main.mul1.c.out_edges[0].resolve() == main.mul2.a
+        self.assertTrue(len(main.mul1.c.in_edges) == 1 and main.mul1.c.in_edges[0].resolve() == main.mul1.m)
+        self.assertTrue(len(main.mul1.c.out_edges) == 1 and main.mul1.c.out_edges[0].resolve() == main.mul2.a)
 
 
         # Assert mul2 connections
-        assert len(main.mul2.a.in_edges) == 1 and main.mul2.a.in_edges[0].resolve() == main.mul1.c
-        assert len(main.mul2.a.out_edges) == 1 and main.mul2.a.out_edges[0].resolve() == main.mul2.m
+        self.assertTrue(len(main.mul2.a.in_edges) == 1 and main.mul2.a.in_edges[0].resolve() == main.mul1.c)
+        self.assertTrue(len(main.mul2.a.out_edges) == 1 and main.mul2.a.out_edges[0].resolve() == main.mul2.m)
 
-        assert len(main.mul2.b.in_edges) == 1 and main.mul2.b.in_edges[0].resolve() == main.x3
-        assert len(main.mul2.b.out_edges) == 1 and main.mul2.b.out_edges[0].resolve() == main.mul2.m
+        self.assertTrue(len(main.mul2.b.in_edges) == 1 and main.mul2.b.in_edges[0].resolve() == main.x3)
+        self.assertTrue(len(main.mul2.b.out_edges) == 1 and main.mul2.b.out_edges[0].resolve() == main.mul2.m)
 
-        assert len(main.mul2.m.in_edges) == 2 and main.mul2.m.in_edges[0].resolve() in (main.mul2.a, main.mul1.b) and main.mul2.m.in_edges[1].resolve() in (main.mul2.a, main.mul2.b)
-        assert len(main.mul2.m.out_edges) == 1 and main.mul2.m.out_edges[0].resolve() == main.mul2.c
+        self.assertTrue(len(main.mul2.m.in_edges) == 2 and main.mul2.m.in_edges[0].resolve() in (main.mul2.a, main.mul1.b) and main.mul2.m.in_edges[1].resolve() in (main.mul2.a, main.mul2.b))
+        self.assertTrue(len(main.mul2.m.out_edges) == 1 and main.mul2.m.out_edges[0].resolve() == main.mul2.c)
 
-        assert len(main.mul2.c.in_edges) == 1 and main.mul2.c.in_edges[0].resolve() == main.mul2.m
-        assert len(main.mul2.c.out_edges) == 1 and main.mul2.c.out_edges[0].resolve() == main.x4
+        self.assertTrue(len(main.mul2.c.in_edges) == 1 and main.mul2.c.in_edges[0].resolve() == main.mul2.m)
+        self.assertTrue(len(main.mul2.c.out_edges) == 1 and main.mul2.c.out_edges[0].resolve() == main.x4)
 
 
         # Solve
@@ -209,7 +209,7 @@ class Web3TestCases(TestCase):
         res = circuit.execute()
         S   = main.els.build_solution_vector(res)
 
-        assert r1cs.is_valid_assignment(S)
+        self.assertTrue(r1cs.is_valid_assignment(S))
 
 
     def test_3fac_lexer(self):
@@ -226,13 +226,13 @@ class Web3TestCases(TestCase):
         res = circuit.execute()
         S   = prog.components['main'].els.build_solution_vector(res)
 
-        assert qap.is_valid_assignment(S)
+        self.assertTrue(qap.is_valid_assignment(S))
 
 
         # Make sure it doesn't if the solution is wrong
         S_bad    = [e for e in S]
         S_bad[0] = F(1)
-        assert not qap.is_valid_assignment(S_bad)
+        self.assertFalse(qap.is_valid_assignment(S_bad))
 
 
     def test_3fac_CRS_example(self):
@@ -294,9 +294,9 @@ class Web3TestCases(TestCase):
 
         proof = (g1A, g1C, g2B)
 
-        assert g1A == E6(35, 15)
-        assert g1C == E6(13, 28)
-        assert g2B == E6(7*y**2, 27*y**3)
+        self.assertEqual(g1A, E6(35, 15))
+        self.assertEqual(g1C, E6(13, 28))
+        self.assertEqual(g2B, E6(7*y**2, 27*y**3))
 
 
     def test_3fac_groth16_example(self):
@@ -335,14 +335,14 @@ class Web3TestCases(TestCase):
 
         params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
         crs    = CRS.generate(qap, params, st, num_instances=len(I))
-        proof  = Groth16Proof.generate(crs, I, W, r=Fr(11), t=Fr(4))
+        proof  = Groth16Proof.generate(crs, I, W, Fr, r=Fr(11), t=Fr(4))
 
-        assert proof.g1A == E6(35, 15)
-        assert proof.g1C == E6(13, 28)
-        assert proof.g2B == E6(7*y**2, 27*y**3)
+        self.assertEqual(proof.g1A, E6(35, 15))
+        self.assertEqual(proof.g1C, E6(13, 28))
+        self.assertEqual(proof.g2B, E6(7*y**2, 27*y**3))
 
-        assert proof.verify(I)
-        assert not proof.verify([Fr(3)])
+        self.assertTrue(proof.verify(I))
+        self.assertFalse(proof.verify([Fr(3)]))
 
 
     def test_3fac_complete_compilation(self):
@@ -376,7 +376,7 @@ class Web3TestCases(TestCase):
 
         params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
         crs    = CRS.generate(qap, params, st, num_instances=len(I))
-        proof  = Groth16Proof.generate(crs, I, W, r=Fr(11), t=Fr(4))
+        proof  = Groth16Proof.generate(crs, I, W, Fr)
 
-        assert proof.verify(I)
-        assert not proof.verify([Fr(3)])
+        self.assertTrue(proof.verify(I))
+        self.assertFalse(proof.verify([Fr(3)]))

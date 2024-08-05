@@ -77,7 +77,7 @@ class Groth16Proof(BaseObject):
 
 
     @staticmethod
-    def generate(crs: 'CRS', I: list, W: list, r: 'FieldElement'=None, t: 'FieldElement'=None) -> 'Groth16Proof':
+    def generate(crs: 'CRS', I: list, W: list, Fr: 'Field', r: 'FieldElement'=None, t: 'FieldElement'=None) -> 'Groth16Proof':
         r = r or Fr.random()
         t = t or Fr.random()
 
