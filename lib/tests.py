@@ -228,7 +228,6 @@ class Web3TestCases(TestCase):
 
         self.assertTrue(qap.is_valid_assignment(S))
 
-
         # Make sure it doesn't if the solution is wrong
         S_bad    = [e for e in S]
         S_bad[0] = F(1)
@@ -335,7 +334,7 @@ class Web3TestCases(TestCase):
 
         params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
         crs    = CRS.generate(qap, params, st, num_instances=len(I))
-        proof  = Groth16Proof.generate(crs, I, W, Fr, r=Fr(11), t=Fr(4))
+        proof  = Groth16Proof.generate(crs, I, W, r=Fr(11), t=Fr(4))
 
         self.assertEqual(proof.g1A, E6(35, 15))
         self.assertEqual(proof.g1C, E6(13, 28))
@@ -362,7 +361,49 @@ class Web3TestCases(TestCase):
         I, W = S[:1], S[1:]
 
         # Build SNARK
-        st  = SimulationTrapdoor.generate(Fr)
+        st = SimulationTrapdoor.generate(Fr)
+        F  = ZZ/ZZ(43)
+        E  = EllipticCurve(F(0), F(6))
+
+        y     = Symbol('y')
+        P     = F[y]
+        F43_6 = FF(43, 6, reducing_poly=y**6 + 6)
+
+        E6 = EllipticCurve(F43_6(E.a), F43_6(E.b))
+        g1 = E6(13, 15)
+        g2 = E6(7*y**2, 16*y**3)
+
+        params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
+        crs    = CRS.generate(qap, params, st, num_instances=len(I))
+        proof  = Groth16Proof.generate(crs, I, W)
+
+        self.assertTrue(proof.verify(I))
+        self.assertFalse(proof.verify([Fr(3)]))
+
+
+    def test_3fac_groth16_forgery_example(self):
+        # Compile 3fac problem into QAP
+        Fr = ZZ/ZZ(13)
+        I  = [Fr(11)]
+        W  = [Fr(2), Fr(3), Fr(4), Fr(6)]
+
+        system = R1CSSystem([
+            R1CSConstraint(
+                [Fr(0), Fr(0), Fr(1), Fr(0), Fr(0), Fr(0)],
+                [Fr(0), Fr(0), Fr(0), Fr(1), Fr(0), Fr(0)],
+                [Fr(0), Fr(0), Fr(0), Fr(0), Fr(0), Fr(1)]
+            ),
+            R1CSConstraint(
+                [Fr(0), Fr(0), Fr(0), Fr(0), Fr(0), Fr(1)],
+                [Fr(0), Fr(0), Fr(0), Fr(0), Fr(1), Fr(0)],
+                [Fr(0), Fr(1), Fr(0), Fr(0), Fr(0), Fr(0)]
+            )
+        ])
+
+        qap = QAPSystem.from_r1cs_system(Fr, system, m=(Fr(5), Fr(7)))
+        st  = SimulationTrapdoor(Fr(6), Fr(5), Fr(4), Fr(3), Fr(2))
+
+        # Build curves
         F   = ZZ/ZZ(43)
         E   = EllipticCurve(F(0), F(6))
 
@@ -376,7 +417,9 @@ class Web3TestCases(TestCase):
 
         params = Groth16Parameters(G1=E, G2=E6, g1=g1, g2=g2, Fr=Fr)
         crs    = CRS.generate(qap, params, st, num_instances=len(I))
-        proof  = Groth16Proof.generate(crs, I, W, Fr)
+        proof  = Groth16Proof.forge(crs, I, st, A=Fr(9), B=Fr(3))
 
+        self.assertEqual(proof.g1A, E6(35, 15))
+        self.assertEqual(proof.g1C, E6(33, 9))
+        self.assertEqual(proof.g2B, E6(42*y**2, 16*y**3))
         self.assertTrue(proof.verify(I))
-        self.assertFalse(proof.verify([Fr(3)]))

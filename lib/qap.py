@@ -18,8 +18,7 @@ class QAPSystem(BaseObject):
         A,B,C = [[] for _ in range(nm)], [[] for _ in range(nm)], [[] for _ in range(nm)]
 
         Fm    = F.mul_group()
-        G     = Fm.find_gen()
-        m     = m or [G*j for j in range(1,k+1)]
+        m     = m or [Fm.random().val for _ in range(1,k+1)]
         x     = Symbol('x')
         P     = F[x]
         T     = product([(x-ml) for ml in m])

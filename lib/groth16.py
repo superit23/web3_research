@@ -77,9 +77,10 @@ class Groth16Proof(BaseObject):
 
 
     @staticmethod
-    def generate(crs: 'CRS', I: list, W: list, Fr: 'Field', r: 'FieldElement'=None, t: 'FieldElement'=None) -> 'Groth16Proof':
-        r = r or Fr.random()
-        t = t or Fr.random()
+    def generate(crs: 'CRS', I: list, W: list, r: 'FieldElement'=None, t: 'FieldElement'=None) -> 'Groth16Proof':
+        Frm = crs.params.Fr.mul_group()
+        r   = r or Frm.random().val
+        t   = t or Frm.random().val
 
         g1_alpha = crs.CRS_G1[0][0]
         g1_beta  = crs.CRS_G1[0][1]
@@ -113,3 +114,18 @@ class Groth16Proof(BaseObject):
         g1_I = sum([g1_g*int(i) for g1_g, i in zip(self.crs.CRS_G1[2], [0]+I)], self.crs.params.G2.zero)
 
         return e(self.g1A, self.g2B) == e(g1_alpha, g2_beta) * e(g1_I, g2_gamma) * e(self.g1C, g2_delta)
+
+
+    @staticmethod
+    def forge(crs: 'CRS', I: list, st: "SimulationTrapdoor", A: 'FieldElement'=None, B: 'FieldElement'=None):
+        Frm = crs.params.Fr.mul_group()
+        A,B = A or Frm.random().val, B or Frm.random().val
+        g1  = crs.params.g1
+        g2  = crs.params.g2
+        g1A = g1*int(A)
+        g2B = g2*int(B)
+
+        I_prime = [1, *I]
+        g1C     = g1*int(A*B / st.delta) + g1*int(-st.alpha*st.beta / st.delta) + sum([g1*int(-(st.beta*crs.qap.Ax[j](st.tau) + st.alpha*crs.qap.Bx[j](st.tau) + crs.qap.Cx[j](st.tau)) / st.delta * I_prime[j]) for j in range(len(I_prime))], g1.ring.zero)
+
+        return Groth16Proof(g1A, g1C, g2B, crs)
