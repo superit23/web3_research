@@ -97,7 +97,7 @@ class Groth16Proof(BaseObject):
         g1C = g1W + crs.eval_gT_tau(crs.qap.H(I + W)) + g1A*int(t) + g1B*int(r) + g1_delta*int(-r*t)
 
         return Groth16Proof(g1A, g1C, g2B, crs)
-    
+
 
     def verify(self, I: list):
         g1_alpha = self.crs.CRS_G1[0][0]

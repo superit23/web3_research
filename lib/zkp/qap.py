@@ -45,11 +45,10 @@ class QAPSystem(BaseObject):
         C = sum([c*v for c,v in zip(self.Cx, [1] + S)])
 
         return (A * B - C)
-    
+
 
     def H(self, S):
         return self.P(S) // self.T
 
     def is_valid_assignment(self, S: list):
         return self.P(S) % self.T == self.T.ring(0)
-

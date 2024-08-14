@@ -130,7 +130,7 @@ class Node(BaseObject):
 
     def generate_constraint(self):
         self.finalize()
-    
+
 
     def build_expression(self):
         self.finalize()
