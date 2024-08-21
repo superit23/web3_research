@@ -537,15 +537,7 @@ Each oracle is simple an externally owned account that is allowed to report a pr
 
 Wait.
 
-What were those two weird blobs up there? Let's look at the trusted oracle addresses again.
-
-```solidity
-    address[] sources = [
-        0x188Ea627E3531Db590e6f1D71ED83628d1933088
-        0xA417D473c40a4d42BAd35f147c21eEa7973539D8,
-        0xab3600bF153A316dE44827e2473056d56B774a40
-    ];
-```
+What were those two weird blobs up there?
 
 ```bash
 ┌──(samson)─[170]─[17:06:32]─[0:00:00.005972]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
@@ -575,6 +567,16 @@ Um okay, looks like it could be a 256-bit integer? Let's pop it into ECDSA and r
 ┌──(samson)─[176]─[16:23:28]─[0:00:00.000969]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
 └─$ keccak256.hash(ec.Q.serialize_uncompressed()[1:])[-20:].hex()
 <Bytes: b'a417d473c40a4d42bad35f147c21eea7973539d8', byteorder='big'>
+```
+
+Looks familiar... Let's check the oracle's addresses.
+
+```solidity
+    address[] sources = [
+        0x188Ea627E3531Db590e6f1D71ED83628d1933088
+        0xA417D473c40a4d42BAd35f147c21eEa7973539D8, // (͠≖ ͜ʖ͠≖)👌
+        0xab3600bF153A316dE44827e2473056d56B774a40
+    ];
 ```
 
 Oh! It's an oracle's hex-encoded, BASE64-encoded, ASCII-encoded, hex-encoded private key! We have 2/3 of the oracles!
