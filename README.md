@@ -26,6 +26,6 @@ Read Yao garbled circuits | Implement garbled circuits
 ## Ethereum
 | Reading                                                             | Practical                                                     | Artifact |
 |---------------------------------------------------------------------|---------------------------------------------------------------|----------|
-| [Solidity docs](https://docs.soliditylang.org/en/latest/)                                                       | [DamnVulnerable Defi CTF](https://www.damnvulnerabledefi.xyz/) |  [DVDv4 folder](https://github.com/superit23/web3_research/tree/main/ctfs/dvd_v4)        |
+| [Solidity docs](https://docs.soliditylang.org/en/latest/)                                                       | [Damn Vulnerable DeFi CTF](https://www.damnvulnerabledefi.xyz/) |  [DVDv4 folder](https://github.com/superit23/web3_research/tree/main/ctfs/dvd_v4)        |
 | [Zellic reports](https://github.com/Zellic/publications)             |                                                               |          |
 | [Trail of Bits reports](https://github.com/trailofbits/publications) |                                                               |          |
